@@ -124,17 +124,23 @@ python export_chuku.py
 | `DH_PASSWORD`           |  ✅   | 懂火系统登录密码                                 | `你的懂火密码`                    |
 | `FEISHU_APP_ID`         |  ✅   | 飞书自建应用 App ID（cli_开头）                  | `cli_a1b2c3d4e5f6`                |
 | `FEISHU_APP_SECRET`     |  ✅   | 飞书自建应用 App Secret                          | `a1b2c3d4e5f6g7h8i9j0`            |
-| `FEISHU_FOLDER_TOKEN`   |  ✅   | 目标文件夹 token（fldcn...，见 3.2）             | `fldcnABCDEFGHIJKLMNOP`           |
+| `FEISHU_FOLDER_TOKEN`   |  ✅   | 出库记录目标文件夹 token（fldcn...，见 3.2）     | `fldcnABCDEFGHIJKLMNOP`           |
+| `LD_FOLDER_TOKEN`       |  ✅   | **临调库存**目标文件夹 token（与上面可不同）     | `fldcnXXXXXXXXXXXXXXXX`           |
 | `FEISHU_WEBHOOK_URL`    | 可选 | 通知机器人 Webhook（空=不通知）                  | `https://open.feishu.cn/.../hook` |
 | `FEISHU_WEBHOOK_SECRET` | 可选 | 机器人签名密钥（没开启签名校验就**不建**这个）   | `abcDefG123`                      |
 | `SMTP_HOST` / 等邮件相关 | 可选 | 备用邮件模式（`DELIVERY_MODE=mail` 时才用）     | 详见 README 旧版本               |
 
 #### **Variables** 选项卡 → `New repository variable`（非敏感，方便改）：
 
-| Variable 名     | 说明                                           | 默认值 |
-| --------------- | ---------------------------------------------- | :----: |
-| `DELIVERY_MODE` | `feishu` 或 `mail`                             | `feishu` |
-| `EXPORT_DAYS`   | 导出最近 N 天数据；0=全部历史                  |  `30`  |
+| Variable 名           | 说明                                           | 默认值 |
+| --------------------- | ---------------------------------------------- | :----: |
+| `DELIVERY_MODE`       | 出库记录交付方式：`feishu` 或 `mail`           | `feishu` |
+| `EXPORT_DAYS`         | 出库记录导出最近 N 天；0=全部历史              |  `30`  |
+| `LD_DELIVERY_MODE`    | **临调库存**交付方式：`feishu` 或 `mail`       | `feishu` |
+| `LD_FILTER_SXZHUANTAI`| 临调筛选：状态（已锁/未锁，空=全部）           |  空    |
+| `LD_FILTER_HUOQUAN`   | 临调筛选：货权（拥有/待赎，空=全部）           |  空    |
+| `LD_FILTER_CANKU`     | 临调筛选：仓库（精确匹配，空=全部）            |  空    |
+| `LD_FILTER_PINMIN`    | 临调筛选：品名（空=全部）                      |  空    |
 
 ### Step 3：手动触发一次验证
 
