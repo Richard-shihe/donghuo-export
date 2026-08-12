@@ -1,0 +1,88 @@
+name: 自动导出库记录并上传飞书云盘
+
+# 触发方式：
+# 1) 每天北京时间 10:00 和 22:00 各执行一次（UTC 2:00 / 14:00）
+# 2) 可在 Actions 页面手动点击 "Run workflow" 立即测试
+on:
+  schedule:
+    - cron: "0 2 * * *"
+    - cron: "0 14 * * *"
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "手动触发说明（可选）"
+        required: false
+        default: "手动立即触发"
+
+# 并发控制：同一时刻只跑一个实例
+concurrency:
+  group: export-chuku
+  cancel-in-progress: false
+
+jobs:
+  export-and-upload:
+    name: 导出库记录 → 上传飞书云盘 → 通知
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 安装 Python 依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 运行导出脚本 → 上传飞书云盘 → 通知
+        env:
+          # ===== 交付方式：feishu（默认） 或 mail =====
+          DELIVERY_MODE: ${{ vars.DELIVERY_MODE || 'feishu' }}
+
+          # ===== 懂火系统账号（在仓库 Secrets 中配置） =====
+          DH_USERNAME: ${{ secrets.DH_USERNAME }}
+          DH_PASSWORD: ${{ secrets.DH_PASSWORD }}
+
+          # 导出最近 N 天的出库记录（0 = 全部历史）；默认 30 天
+          EXPORT_DAYS: ${{ vars.EXPORT_DAYS || '30' }}
+
+          # ===== 飞书云盘 + 通知（主模式） =====
+          # 企业自建应用的 App ID / App Secret
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          # 目标文件夹 token（形如 fldcnXXXXXX，见 README 获取方法）
+          FEISHU_FOLDER_TOKEN: ${{ secrets.FEISHU_FOLDER_TOKEN }}
+          # 通知机器人 Webhook（可选，上传成功后发通知）
+          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
+          FEISHU_WEBHOOK_SECRET: ${{ secrets.FEISHU_WEBHOOK_SECRET }}
+
+          # ===== 邮件（备用模式：当 DELIVERY_MODE=mail 时使用） =====
+          MAIL_TO: ${{ secrets.MAIL_TO }}
+          MAIL_FROM: ${{ secrets.MAIL_FROM }}
+          #   QQ邮箱示例:   SMTP_HOST=smtp.qq.com    SMTP_PORT=465  SMTP_USE_SSL=1
+          #   163邮箱示例:  SMTP_HOST=smtp.163.com   SMTP_PORT=465  SMTP_USE_SSL=1
+          #   Gmail示例:    SMTP_HOST=smtp.gmail.com SMTP_PORT=465  SMTP_USE_SSL=1
+          #   企业微信邮箱:  SMTP_HOST=smtp.exmail.qq.com SMTP_PORT=465
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          SMTP_USE_SSL: ${{ secrets.SMTP_USE_SSL || '1' }}
+
+          # 时区（确保文件名时间正确）
+          TZ: "Asia/Shanghai"
+        run: |
+          python export_chuku.py
+          EXIT_CODE=$?
+          echo "脚本退出码: $EXIT_CODE"
+          exit $EXIT_CODE
+
+      - name: 失败时保留失败信息
+        if: failure()
+        run: |
+          echo "::warning:: 自动导出失败，请检查 Secrets 配置或目标网站状态"

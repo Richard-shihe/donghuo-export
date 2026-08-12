@@ -1,0 +1,82 @@
+name: 自动导出临调库存并上传飞书云盘
+
+# 触发方式：
+# 1) 每天北京时间 09:30 执行一次（UTC 1:30）
+#    cron 格式：分 时 日 月 周（UTC 时区，北京时间 = UTC+8）
+# 2) 可在 Actions 页面手动点击 "Run workflow" 立即触发
+on:
+  schedule:
+    - cron: "30 1 * * *"
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "手动触发说明（可选）"
+        required: false
+        default: "手动立即导出临调库存"
+
+# 并发控制：同一时刻只跑一个实例
+concurrency:
+  group: export-lindiao
+  cancel-in-progress: false
+
+jobs:
+  export-and-upload:
+    name: 导出临调库存 → 上传飞书云盘 → 通知
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 安装 Python 依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 运行临调库存导出脚本 → 上传飞书云盘 → 通知
+        env:
+          # ===== 交付方式：feishu（默认） 或 local（仅本地保存，无意义，CI 里请用 feishu）=====
+          DELIVERY_MODE: ${{ vars.LD_DELIVERY_MODE || 'feishu' }}
+
+          # ===== 懂火系统账号（在仓库 Secrets 中配置） =====
+          DH_USERNAME: ${{ secrets.DH_USERNAME }}
+          DH_PASSWORD: ${{ secrets.DH_PASSWORD }}
+
+          # ===== 飞书云盘（主模式） =====
+          # 企业自建应用的 App ID / App Secret
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          # 目标文件夹 token (临调库存（欧冶资源）文件夹 O8i6fsf5dlQtX3ds3D2cjGQtnVh)
+          FEISHU_FOLDER_TOKEN: ${{ secrets.LD_FOLDER_TOKEN }}
+          # 通知机器人 Webhook（可选，上传成功后发通知）
+          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
+          FEISHU_WEBHOOK_SECRET: ${{ secrets.FEISHU_WEBHOOK_SECRET }}
+
+          # ===== 可选筛选（都为空表示导出全部） =====
+          # 状态筛选：已锁 / 未锁
+          FILTER_SXZHUANTAI: ${{ vars.LD_FILTER_SXZHUANTAI || '' }}
+          # 货权筛选：拥有 / 待赎
+          FILTER_HUOQUAN: ${{ vars.LD_FILTER_HUOQUAN || '' }}
+          # 仓库筛选（精确匹配）
+          FILTER_CANKU: ${{ vars.LD_FILTER_CANKU || '' }}
+          # 品名筛选
+          FILTER_PINMIN: ${{ vars.LD_FILTER_PINMIN || '' }}
+
+          # 时区（确保文件名时间、日期正确）
+          TZ: "Asia/Shanghai"
+        run: |
+          python feishu_uploader/export_lindiao.py
+          EXIT_CODE=$?
+          echo "脚本退出码: $EXIT_CODE"
+          exit $EXIT_CODE
+
+      - name: 失败时告警
+        if: failure()
+        run: |
+          echo "::warning:: 临调库存自动导出失败，请检查 Secrets 配置或目标网站状态"

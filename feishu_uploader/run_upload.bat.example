@@ -1,0 +1,46 @@
+@echo off
+REM ==========================================================================
+REM 临调库存导出 → 飞书云盘 启动脚本（模板）
+REM 由 Windows 计划任务定时调用
+REM ==========================================================================
+REM 使用方法：复制本文件为 run_upload.bat，填入真实凭据后使用
+REM   copy run_upload.bat.example run_upload.bat
+REM run_upload.bat 已被 .gitignore 忽略，不会提交到仓库
+setlocal enabledelayedexpansion
+
+cd /d "%~dp0.."
+
+REM ===== 必要配置（请替换为真实值）=====
+set DELIVERY_MODE=feishu
+set DH_USERNAME=你的懂火账号
+set DH_PASSWORD=你的懂火密码
+set FEISHU_APP_ID=cli_xxxxxxxxxxxxxxxx
+set FEISHU_APP_SECRET=你的飞书应用AppSecret
+set FEISHU_FOLDER_TOKEN=fldcnxxxxxxxxxxxxxxxx
+
+REM ===== 可选筛选（留空=全部）=====
+REM 状态：已锁 / 未锁
+set FILTER_SXZHUANTAI=
+REM 货权：拥有 / 待赎
+set FILTER_HUOQUAN=
+REM 仓库（精确匹配，如 仲鼎库）
+set FILTER_CANKU=
+REM 品名（如 酸洗）
+set FILTER_PINMIN=
+
+REM ===== 可选：飞书机器人通知 =====
+set FEISHU_WEBHOOK_URL=
+set FEISHU_WEBHOOK_SECRET=
+
+REM ===== 运行日志 =====
+set LOG_FILE=%~dp0run_upload_%date:~0,4%%date:~5,2%%date:~8,2%.log
+echo [%date% %time%] 开始执行... > "%LOG_FILE%"
+echo [%date% %time%] WORKDIR=%cd% >> "%LOG_FILE%"
+
+python feishu_uploader\export_lindiao.py >> "%LOG_FILE%" 2>&1
+set EXIT_CODE=%ERRORLEVEL%
+
+echo [%date% %time%] 执行结束，退出码=%EXIT_CODE% >> "%LOG_FILE%"
+echo. >> "%LOG_FILE%"
+
+exit /b %EXIT_CODE%

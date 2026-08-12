@@ -1,0 +1,20 @@
+# ===== 敏感文件（含真实凭据，切勿提交）=====
+# 本地启动脚本，含真实账号/密钥，每人各自维护
+feishu_uploader/run_upload.bat
+.env
+.env.*
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ===== 运行产物 =====
+*.log
+*.csv
+
+# ===== 系统 =====
+.DS_Store
+Thumbs.db
