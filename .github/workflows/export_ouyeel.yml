@@ -1,0 +1,93 @@
+name: 自动导出欧冶产能预售并上传飞书云盘
+
+# 触发方式：
+# 1) 每天北京时间 08:00 执行一次（UTC 0:00）
+# 2) 可在 Actions 页面手动点击 "Run workflow" 立即触发
+on:
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "手动触发说明（可选）"
+        required: false
+        default: "手动立即导出欧冶产能预售"
+
+# 并发控制：同一时刻只跑一个实例
+concurrency:
+  group: export-ouyeel
+  cancel-in-progress: false
+
+jobs:
+  export-and-upload:
+    name: 导出欧冶产能预售 → 上传飞书云盘 → 通知
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 缓存 Playwright 浏览器
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-playwright-
+
+      - name: 安装 Python 依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 安装 Playwright 浏览器（chromium + 系统依赖）
+        run: playwright install --with-deps chromium
+
+      - name: 还原欧冶登录态 storage_state
+        env:
+          OUYEEL_STORAGE_STATE: ${{ secrets.OUYEEL_STORAGE_STATE }}
+        run: |
+          if [ -z "$OUYEEL_STORAGE_STATE" ]; then
+            echo "::error::未配置 Secret OUYEEL_STORAGE_STATE"
+            exit 1
+          fi
+          echo "$OUYEEL_STORAGE_STATE" | base64 -d > feishu_uploader/.ouyeel_state.json
+          echo "storage_state 已还原，大小: $(wc -c < feishu_uploader/.ouyeel_state.json) bytes"
+
+      - name: 运行欧冶产能预售导出脚本 → 上传飞书云盘 → 通知
+        env:
+          # ===== 交付方式 =====
+          DELIVERY_MODE: ${{ vars.OUYEEL_DELIVERY_MODE || 'feishu' }}
+
+          # ===== 飞书云盘 =====
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          # 欧冶数据目标文件夹 token（与临调库存 LD_FOLDER_TOKEN 不同）
+          FEISHU_FOLDER_TOKEN: ${{ secrets.OUYEEL_FOLDER_TOKEN }}
+          # 通知机器人（复用，用于告警/成功通知）
+          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
+          FEISHU_WEBHOOK_SECRET: ${{ secrets.FEISHU_WEBHOOK_SECRET }}
+
+          # ===== 分页参数 =====
+          OUYEEL_PAGE_SIZE: ${{ vars.OUYEEL_PAGE_SIZE || '50' }}
+          OUYEEL_MAX_PAGES: ${{ vars.OUYEEL_MAX_PAGES || '10' }}
+
+          # 时区（确保文件名时间、日期正确）
+          TZ: "Asia/Shanghai"
+        run: |
+          python feishu_uploader/export_ouyeel.py
+          EXIT_CODE=$?
+          echo "脚本退出码: $EXIT_CODE"
+          exit $EXIT_CODE
+
+      - name: 失败时告警
+        if: failure()
+        run: |
+          echo "::warning:: 欧冶产能预售自动导出失败，请检查 OUYEEL_STORAGE_STATE 是否过期、Secrets 配置或欧冶网站状态"
+          echo "本地刷新登录态：python feishu_uploader/export_ouyeel.py --dump-state"

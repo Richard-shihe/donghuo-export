@@ -15,6 +15,24 @@ venv/
 *.log
 *.csv
 
+# ===== 欧冶登录态（含 cookie，敏感，切勿提交）=====
+feishu_uploader/.ouyeel_state.json
+feishu_uploader/.ouyeel_state.json.b64
+cookies.json
+feishu_uploader/.ouyeel_login_dbg.png
+feishu_uploader/.ouyeel_login_html.txt
+
+# ===== 一次性诊断/测试脚本（含硬编码 app_token，不提交）=====
+feishu_uploader/diag_*.py
+feishu_uploader/diag_*.html
+feishu_uploader/test_*.py
+feishu_uploader/append_to_bitable.py
+feishu_uploader/get_view_fields.py
+
+# ===== IDE 本地配置 =====
+.trae/
+.vscode/
+
 # ===== 系统 =====
 .DS_Store
 Thumbs.db

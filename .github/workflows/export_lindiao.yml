@@ -1,12 +1,12 @@
 name: 自动导出临调库存并上传飞书云盘
 
 # 触发方式：
-# 1) 每天北京时间 08:00 执行一次（UTC 0:00）
+# 1) 每天北京时间 09:30 执行一次（UTC 1:30）
 #    cron 格式：分 时 日 月 周（UTC 时区，北京时间 = UTC+8）
 # 2) 可在 Actions 页面手动点击 "Run workflow" 立即触发
 on:
   schedule:
-    - cron: "0 0 * * *"
+    - cron: "30 1 * * *"
   workflow_dispatch:
     inputs:
       reason:
