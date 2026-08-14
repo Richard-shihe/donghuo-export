@@ -63,14 +63,8 @@ jobs:
 
           # ===== 飞书多维表格 =====
           # 多维表格 app_token（URL 中 /base/ 后面的那段）
+          # 其他参数（表ID/视图/去重等）在脚本内有默认值，通常无需覆盖
           BITABLE_APP_TOKEN: ${{ secrets.BITABLE_APP_TOKEN }}
-          # 默认表ID=滚动表，视图=放入视图（可在此覆盖）
-          BITABLE_TABLE_ID: ${{ vars.KP_BITABLE_TABLE_ID || 'tblfqRNfFg3NUcTo' }}
-          # 去重开关：1=按申请单号去重（默认），0=允许重复追加
-          BITABLE_DEDUP: ${{ vars.KP_BITABLE_DEDUP || '1' }}
-
-          # ===== 可选筛选（默认状态=待确认）=====
-          FILTER_ZHUANTAI: ${{ vars.KP_FILTER_ZHUANTAI || '待确认' }}
 
           # 时区（确保文件名时间、日期正确）
           TZ: "Asia/Shanghai"
