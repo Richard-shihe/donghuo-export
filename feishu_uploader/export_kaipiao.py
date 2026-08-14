@@ -925,11 +925,14 @@ def main() -> int:
                 dedup=bt_dedup,
             )
 
-            # 更新打铃通知的'最后打铃时间'为当下时间
-            try:
-                bitable_update_bell_time(token=token, app_token=bt_app_token)
-            except Exception as exc:
-                print(f"[警告] 打铃通知更新失败（不影响主流程）: {exc}")
+            # 仅当有新增记录时，才更新打铃通知的'最后打铃时间'为当下时间
+            if result["created"] > 0:
+                try:
+                    bitable_update_bell_time(token=token, app_token=bt_app_token)
+                except Exception as exc:
+                    print(f"[警告] 打铃通知更新失败（不影响主流程）: {exc}")
+            else:
+                print(f"[打铃通知] 本次新增 0 条，跳过更新'最后打铃时间'")
 
             notify_lines = [f"✅ 开票申请单 → 飞书多维表格追加完成"] + summary_lines
             notify_lines.append(f"目标表: app_token={bt_app_token} table_id={bt_table_id}")
