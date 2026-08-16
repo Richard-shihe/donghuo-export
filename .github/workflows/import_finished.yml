@@ -3,16 +3,16 @@ name: 飞书加工成品 → 懂火（批量写入）
 on:
   workflow_dispatch:
     inputs:
-      dry_run:
-        description: "预览模式（不实际写懂火，默认开启；写入请手动改为 false）"
-        required: false
-        type: boolean
-        default: true
       limit:
         description: "最多处理 N 个加工单（留空=全部）"
         required: false
         type: string
         default: ""
+      dry_run:
+        description: "预览模式（不实际写懂火，调试用）"
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: import-finished
@@ -50,9 +50,11 @@ jobs:
           TZ: "Asia/Shanghai"
         run: |
           ARGS=""
-          if [ "${{ fromJSON(inputs.dry_run) }}" = "true" ] || [ -z "${{ inputs.dry_run }}" ]; then
+          if [ "${{ fromJSON(inputs.dry_run) }}" = "true" ]; then
             ARGS="$ARGS --dry-run"
-            echo "⚠️  预览模式开启，不会实际写懂火、不会回写飞书状态（如需写入，请将 dry_run 设为 false）"
+            echo "⚠️  预览模式（不写懂火、不回写飞书状态）"
+          else
+            echo "✅ 实际执行模式（写入懂火 + 回写飞书状态）"
           fi
           if [ -n "${{ inputs.limit }}" ]; then
             export IMPORT_LIMIT="${{ inputs.limit }}"

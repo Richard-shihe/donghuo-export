@@ -3,11 +3,6 @@ name: 懂火加工单 → 飞书加工单表（增量导出）
 on:
   workflow_dispatch:
     inputs:
-      dry_run:
-        description: "预览模式（不实际写飞书）"
-        required: false
-        type: boolean
-        default: true
       since:
         description: "只处理加工单号 >= 这个值的（留空=全部）"
         required: false
@@ -18,6 +13,11 @@ on:
         required: false
         type: string
         default: ""
+      dry_run:
+        description: "预览模式（不实际写飞书，调试用）"
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: export-jiagong
@@ -54,9 +54,11 @@ jobs:
           TZ: "Asia/Shanghai"
         run: |
           ARGS=""
-          if [ "${{ fromJSON(inputs.dry_run) }}" = "true" ] || [ -z "${{ inputs.dry_run }}" ]; then
+          if [ "${{ fromJSON(inputs.dry_run) }}" = "true" ]; then
             ARGS="$ARGS --dry-run"
-            echo "⚠️  预览模式开启，不会实际写飞书（如需写入，请将 dry_run 设为 false）"
+            echo "⚠️  预览模式（不写飞书）"
+          else
+            echo "✅ 实际执行模式（写入飞书）"
           fi
           if [ -n "${{ inputs.since }}" ]; then
             ARGS="$ARGS --since ${{ inputs.since }}"
