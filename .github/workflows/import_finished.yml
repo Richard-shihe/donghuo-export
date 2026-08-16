@@ -1,0 +1,64 @@
+name: 飞书加工成品 → 懂火（批量写入）
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "预览模式（不实际写懂火）"
+        required: false
+        type: boolean
+        default: true
+      limit:
+        description: "最多处理 N 个加工单（留空=全部）"
+        required: false
+        type: string
+        default: ""
+
+concurrency:
+  group: import-finished
+  cancel-in-progress: false
+
+jobs:
+  import-finished:
+    name: 飞书 → 懂火成品明细
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 运行 import_finished.py
+        env:
+          DH_USERNAME: ${{ secrets.DH_USERNAME }}
+          DH_PASSWORD: ${{ secrets.DH_PASSWORD }}
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          BITABLE_APP_TOKEN: ${{ vars.BITABLE_APP_TOKEN || 'CpYZbPbi3a0qo0smUhDcrKFgnGc' }}
+          BITABLE_HEADER_TABLE_ID: ${{ vars.BITABLE_HEADER_TABLE_ID || '' }}
+          BITABLE_FINISHED_TABLE_ID: ${{ vars.BITABLE_FINISHED_TABLE_ID || '' }}
+          TZ: "Asia/Shanghai"
+        run: |
+          ARGS=""
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          if [ -n "${{ inputs.limit }}" ]; then
+            IMPORT_LIMIT="${{ inputs.limit }}"
+            export IMPORT_LIMIT
+          fi
+          echo "运行参数: $ARGS"
+          python import_finished.py $ARGS
+          EXIT_CODE=$?
+          echo "脚本退出码: $EXIT_CODE"
+          exit $EXIT_CODE

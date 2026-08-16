@@ -1,0 +1,70 @@
+name: 懂火加工单 → 飞书加工单表（增量导出）
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "预览模式（不实际写飞书）"
+        required: false
+        type: boolean
+        default: false
+      since:
+        description: "只处理加工单号 >= 这个值的（留空=全部）"
+        required: false
+        type: string
+        default: ""
+      limit:
+        description: "只处理前 N 个加工单（留空=全部）"
+        required: false
+        type: string
+        default: ""
+
+concurrency:
+  group: export-jiagong
+  cancel-in-progress: false
+
+jobs:
+  export-jiagong:
+    name: 懂火 → 飞书加工单表
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 运行 export_jiagong.py
+        env:
+          DH_USERNAME: ${{ secrets.DH_USERNAME }}
+          DH_PASSWORD: ${{ secrets.DH_PASSWORD }}
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          BITABLE_APP_TOKEN: ${{ vars.BITABLE_APP_TOKEN || 'CpYZbPbi3a0qo0smUhDcrKFgnGc' }}
+          BITABLE_JIAGONG_TABLE_ID: ${{ vars.BITABLE_JIAGONG_TABLE_ID || '' }}
+          TZ: "Asia/Shanghai"
+        run: |
+          ARGS=""
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          if [ -n "${{ inputs.since }}" ]; then
+            ARGS="$ARGS --since ${{ inputs.since }}"
+          fi
+          if [ -n "${{ inputs.limit }}" ]; then
+            ARGS="$ARGS --limit ${{ inputs.limit }}"
+          fi
+          echo "运行参数: $ARGS"
+          python export_jiagong.py $ARGS
+          EXIT_CODE=$?
+          echo "脚本退出码: $EXIT_CODE"
+          exit $EXIT_CODE
