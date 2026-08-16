@@ -22,6 +22,10 @@ cookies.json
 feishu_uploader/.ouyeel_login_dbg.png
 feishu_uploader/.ouyeel_login_html.txt
 
+# ===== IECC / 其他平台登录态（含 token，敏感，切勿提交）=====
+iecc.json
+*.state.json
+
 # ===== 一次性诊断/测试脚本（含硬编码 app_token，不提交）=====
 feishu_uploader/diag_*.py
 feishu_uploader/diag_*.html
