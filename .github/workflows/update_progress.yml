@@ -1,0 +1,74 @@
+name: 准发数据 → 写入飞书多维表格"进度"表
+
+# 触发方式：
+# 可在 Actions 页面手动点击 "Run workflow" 立即触发
+# 通常在"准发下载"上传云盘之后立即运行
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "手动触发说明（可选）"
+        required: false
+        default: "手动更新进度表交付量/准发量"
+      dry_run:
+        description: "仅预览匹配结果（true）还是实际写入（false）"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+# 并发控制：同一时刻只跑一个实例（避免重复更新）
+concurrency:
+  group: progress-delivery-update
+  cancel-in-progress: false
+
+jobs:
+  update-progress:
+    name: 读最新准发 xlsx → 匹配合约表 → 更新进度表"准发量/出厂量"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 安装 Python 依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 运行进度表更新脚本
+        env:
+          # ===== 飞书自建应用（在仓库 Secrets 中配置） =====
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+
+          # ===== 多维表格（默认 app_token Tz0XbQVzkaZuJasBwb8cRjkfnoe 已在脚本硬编码） =====
+          # 如需写入其它多维表格，在这里覆盖；留空则用默认
+          BITABLE_APP_TOKEN: ${{ vars.PROGRESS_BITABLE_TOKEN || '' }}
+
+          # 时区（打印日志时日期正确）
+          TZ: "Asia/Shanghai"
+
+          DRY_RUN_FLAG: ${{ inputs.dry_run }}
+        run: |
+          if [ "$DRY_RUN_FLAG" = "true" ]; then
+            python update_progress_delivery.py --dry-run
+          else
+            python update_progress_delivery.py
+          fi
+          EXIT_CODE=$?
+          echo "脚本退出码: $EXIT_CODE"
+          exit $EXIT_CODE
+
+      - name: 失败时告警
+        if: failure()
+        run: |
+          echo "::warning:: 进度表交付量更新失败，请检查飞书 Secrets、多维表字段权限（准发量/出厂量可写）、以及编号匹配逻辑"
