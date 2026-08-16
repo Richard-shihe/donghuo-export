@@ -21,8 +21,7 @@
     3. 上传飞书云盘需要环境变量（不传则跳过上传）：
          FEISHU_APP_ID        自建应用 App ID（cli_ 开头）
          FEISHU_APP_SECRET    自建应用 App Secret
-         FEISHU_FOLDER_TOKEN  目标文件夹 token（分享 URL /folder/ 后那段，
-                              默认 QIvpfoJnqlg8IIdT1PXctnB3nne）
+         FEISHU_FOLDER_TOKEN  目标文件夹 token（分享 URL /folder/ 后那段）
        并确保自建应用开通 drive:drive 权限，且被添加为文件夹"可编辑"协作者。
 
 用法 1 - 命令行：
@@ -88,14 +87,14 @@ _DOWNLOAD_API = 'https://www.ibaosteel.com/iecs/common/download'
 # 结算用户编号（当前账号固定值，从准发页面隐藏字段 #settleUserNum 获取）
 _SETTLE_USER_NUM = '062122'
 
-# 飞书云盘（默认 folder_token = 分享 URL /folder/ 后面那段）
+# 飞书云盘（folder_token 从环境变量 FEISHU_FOLDER_TOKEN 读取）
 FEISHU_OPEN_BASE = "https://open.feishu.cn/open-apis"
-DEFAULT_FOLDER_TOKEN = "QIvpfoJnqlg8IIdT1PXctnB3nne"  # https://s2v31ke6sl.feishu.cn/drive/folder/QIvpfoJnqlg8IIdT1PXctnB3nne
+DEFAULT_FOLDER_TOKEN = ""  # 本地配置环境变量 FEISHU_FOLDER_TOKEN，勿硬编码
 _NO_PROXY = {"http": None, "https": None}
 
 
 # ============================================================
-# 飞书云盘上传辅助（与 export_lindiao / export_ouyeel 保持一致，不抽共用模块）
+# 飞书云盘上传辅助（与 export_lindiao 保持一致，不抽共用模块）
 # ============================================================
 def feishu_tenant_access_token(app_id: str, app_secret: str) -> str:
     if not app_id or not app_secret:

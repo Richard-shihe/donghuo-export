@@ -18,7 +18,7 @@
   FEISHU_APP_SECRET    飞书自建应用 App Secret
 
 环境变量（可选）：
-  BITABLE_APP_TOKEN    多维表格 app_token（默认 Tz0XbQVzkaZuJasBwb8cRjkfnoe）
+  BITABLE_APP_TOKEN    多维表格 app_token（分享 URL /base/ 后面那段）
 
 用法：
   # 1) 配置飞书凭据（PowerShell）
@@ -64,8 +64,8 @@ except ImportError:
 # ============================================================
 FEISHU_OPEN_BASE = "https://open.feishu.cn/open-apis"
 
-# 从分享 URL https://s2v31ke6sl.feishu.cn/base/Tz0XbQVzkaZuJasBwb8cRjkfnoe 提取
-DEFAULT_APP_TOKEN = "Tz0XbQVzkaZuJasBwb8cRjkfnoe"
+# 多维表格 app_token（从环境变量 BITABLE_APP_TOKEN 读取，勿硬编码）
+DEFAULT_APP_TOKEN = ""
 DEFAULT_TABLE_PROGRESS = "进度"          # 写入目标表
 DEFAULT_TABLE_CONTRACT = "合约"          # 查 record_id 的源表（资源号是 Text，可 filter）
 DEFAULT_FIELD_RESOURCE = "资源号"        # 合约表里用来匹配的字段（Text 类型）
@@ -187,14 +187,13 @@ def extract_text_field(val) -> str:
 def search_records_by_resource(
     token: str, app_token: str, table_id: str,
     resource_field: str, resource_values: list[str],
-    link_field: str = "编号",
     page_size: int = 500,
     batch_size: int = 50,
 ) -> dict[str, list[str]]:
-    """在合约表按"资源号"查记录，返回 {资源号值: [编号值, ...]}。
+    """按"资源号"是 [v1, v2, ...] 之一查询所有匹配记录。
 
     飞书 filter conditions 单次最多 50 个，超过自动分批查询。
-    返回的 dict 的 value 是"编号"字段的文本值（用于关联进度表）。
+    返回 {资源号值: [record_id, ...]}（允许同一资源号有多条记录）。
     """
     if not resource_values:
         return {}
@@ -205,7 +204,7 @@ def search_records_by_resource(
 
     result: dict[str, list[str]] = {}
     total_batches = (len(unique_vals) + batch_size - 1) // batch_size
-    print(f"[飞书] 合约表分批查询：{len(unique_vals)} 个资源号，每批 {batch_size}，共 {total_batches} 批")
+    print(f"[飞书] 分批查询：{len(unique_vals)} 个资源号，每批 {batch_size}，共 {total_batches} 批")
 
     for bi in range(0, len(unique_vals), batch_size):
         batch_vals = unique_vals[bi:bi + batch_size]
@@ -248,91 +247,11 @@ def search_records_by_resource(
             d = data.get("data") or {}
             items = d.get("items") or []
             for it in items:
-                fields = it.get("fields") or {}
-                res_val = extract_text_field(fields.get(resource_field))
-                link_val = extract_text_field(fields.get(link_field))
-                if res_val and link_val:
-                    result.setdefault(res_val, []).append(link_val)
-
-            has_more = d.get("has_more", False)
-            page_token = d.get("page_token") or ""
-            if not has_more or not page_token:
-                break
-            time.sleep(0.2)
-        time.sleep(0.15)
-
-    print(f"[飞书] 合约表查询到 {len(result)} 个唯一资源号有匹配记录 "
-          f"(待查 {len(unique_vals)} 个)")
-    return result
-
-
-def search_progress_by_codes(
-    token: str, app_token: str, table_id: str,
-    code_field: str, code_values: list[str],
-    page_size: int = 500,
-    batch_size: int = 50,
-) -> dict[str, list[str]]:
-    """在进度表按"编号"查记录，返回 {编号值: [record_id, ...]}。
-
-    飞书 filter conditions 单次最多 50 个，超过自动分批查询。
-    """
-    if not code_values:
-        return {}
-
-    unique_vals = list({v.strip() for v in code_values if v and v.strip()})
-    if not unique_vals:
-        return {}
-
-    result: dict[str, list[str]] = {}
-    total_batches = (len(unique_vals) + batch_size - 1) // batch_size
-    print(f"[飞书] 进度表分批查询：{len(unique_vals)} 个编号，每批 {batch_size}，共 {total_batches} 批")
-
-    for bi in range(0, len(unique_vals), batch_size):
-        batch_vals = unique_vals[bi:bi + batch_size]
-        conditions = [
-            {"field_name": code_field, "operator": "is", "value": [v]}
-            for v in batch_vals
-        ]
-        page_token = ""
-        seen_tokens: set[str] = set()
-        page_count = 0
-        batch_no = bi // batch_size + 1
-
-        while True:
-            page_count += 1
-            if page_count > 20:
-                print(f"[警告] 批 {batch_no} 已达最大翻页 20，停止")
-                break
-            if page_token and page_token in seen_tokens:
-                break
-            if page_token:
-                seen_tokens.add(page_token)
-
-            url = (f"{FEISHU_OPEN_BASE}/bitable/v1/apps/{app_token}"
-                   f"/tables/{table_id}/records/search")
-            body: dict = {
-                "page_size": page_size,
-                "filter": {
-                    "conjunction": "or",
-                    "conditions": conditions,
-                },
-            }
-            if page_token:
-                body["page_token"] = page_token
-
-            r = requests.post(url, headers={"Authorization": f"Bearer {token}"},
-                              json=body, timeout=30, proxies=_NO_PROXY)
-            data = r.json()
-            if data.get("code") != 0:
-                raise RuntimeError(f"进度表按编号查询失败 (批 {batch_no}): {data}")
-            d = data.get("data") or {}
-            items = d.get("items") or []
-            for it in items:
                 rid = it.get("record_id", "")
                 fields = it.get("fields") or {}
-                code_val = extract_text_field(fields.get(code_field))
-                if code_val and rid:
-                    result.setdefault(code_val, []).append(rid)
+                res_val = extract_text_field(fields.get(resource_field))
+                if res_val and rid:
+                    result.setdefault(res_val, []).append(rid)
 
             has_more = d.get("has_more", False)
             page_token = d.get("page_token") or ""
@@ -341,7 +260,7 @@ def search_progress_by_codes(
             time.sleep(0.2)
         time.sleep(0.15)
 
-    print(f"[飞书] 进度表查询到 {len(result)} 个唯一编号有匹配记录 "
+    print(f"[飞书] 查询到 {len(result)} 个唯一资源号有匹配记录 "
           f"(待查 {len(unique_vals)} 个)")
     return result
 
@@ -373,41 +292,6 @@ def batch_update_records(
         if i + 500 < len(records):
             time.sleep(0.4)
     return updated
-
-
-def _list_all_record_ids(
-    token: str, app_token: str, table_id: str,
-    page_size: int = 500,
-) -> set[str]:
-    """遍历整张表，返回所有 record_id 的集合"""
-    url = (f"{FEISHU_OPEN_BASE}/bitable/v1/apps/{app_token}"
-           f"/tables/{table_id}/records")
-    rids: set[str] = set()
-    page_token = ""
-    page = 0
-    while True:
-        page += 1
-        params = {"page_size": page_size}
-        if page_token:
-            params["page_token"] = page_token
-        r = requests.get(url, params=params,
-                         headers={"Authorization": f"Bearer {token}"},
-                         timeout=30, proxies=_NO_PROXY)
-        data = r.json()
-        if data.get("code") != 0:
-            raise RuntimeError(f"拉取 record_id 失败: {data}")
-        d = data.get("data") or {}
-        for it in d.get("items") or []:
-            rid = it.get("record_id")
-            if rid:
-                rids.add(rid)
-        if not d.get("has_more"):
-            break
-        page_token = d.get("page_token") or ""
-        if not page_token:
-            break
-        time.sleep(0.2)
-    return rids
 
 
 # ============================================================
@@ -470,7 +354,7 @@ def update_progress(
     app_token = app_token or env("BITABLE_APP_TOKEN", DEFAULT_APP_TOKEN)
 
     # 1. 读取 xlsx
-    print(f"\n=== 步骤 1/5：读取 xlsx 并按钢厂订单号汇总 ===")
+    print(f"\n=== 步骤 1/4：读取 xlsx 并按钢厂订单号汇总 ===")
     order_data = read_xlsx(xlsx_path)
     if not order_data:
         print("[警告] xlsx 无有效数据，结束")
@@ -481,7 +365,7 @@ def update_progress(
         print(f"    {k} → 准发量 {v[XLSX_COL_QUASI]}, 出厂量 {v[XLSX_COL_SHIP]}")
 
     # 2. 飞书认证 + 找两张表
-    print(f"\n=== 步骤 2/5：飞书认证 + 找 '{contract_table_name}' 和 '{progress_table_name}' 表 ===")
+    print(f"\n=== 步骤 2/4：飞书认证 + 找 '{contract_table_name}' 和 '{progress_table_name}' 表 ===")
     app_id = env("FEISHU_APP_ID")
     app_secret = env("FEISHU_APP_SECRET")
     token = feishu_tenant_access_token(app_id, app_secret)
@@ -510,68 +394,64 @@ def update_progress(
             )
         print(f"[飞书] 进度表 '{fn}' 字段类型: {meta.get('type')} ({meta.get('ui_type')})")
 
-    # 3. 在合约表按"资源号"批量查询 → 拿到"编号"字段值
-    #    （进度表"资源号"是 Lookup，通过"编号"字段关联合约表）
-    print(f"\n=== 步骤 3/5：在合约表按 '{resource_field}' 查询，读取'编号' ===")
+    # 3. 在合约表按"资源号"批量查询 record_id
+    #    （合约表 record_id 与进度表 record_id 一一对应）
+    print(f"\n=== 步骤 3/4：在合约表按 '{resource_field}' 查询 record_id ===")
     order_list = list(order_data.keys())
     matched = search_records_by_resource(
         token, app_token, contract_id,
         resource_field, order_list,
-        link_field="编号",
     )
 
     xlsx_set = set(order_data.keys())
     matched_set = set(matched.keys())
     missing = xlsx_set - matched_set
-    print(f"[飞书] 合约表匹配结果:")
+    print(f"[飞书] 匹配结果:")
     print(f"  xlsx 中订单数: {len(xlsx_set)}")
     print(f"  合约表匹配数:  {len(matched_set)}")
     print(f"  未匹配数:       {len(missing)}")
     if missing:
         print(f"  未匹配订单号示例: {list(missing)[:10]}")
 
-    # 4. 收集所有"编号"值，在进度表按"编号"查 record_id
-    all_codes: list[str] = []
-    for codes in matched.values():
-        all_codes.extend(codes)
-    print(f"\n=== 步骤 4/5：在进度表按'编号'查询 record_id ===")
-    code_to_rids = search_progress_by_codes(
-        token, app_token, progress_id,
-        "编号", all_codes,
-    )
+    # 4. 拉进度表所有 record_id，过滤掉合约表有但进度表没有的
+    #    （两表 record_id 不是一一对应，只有部分重叠）
+    print(f"\n=== 步骤 4/5：拉进度表 record_id，过滤不存在的 ===")
+    progress_rids = _list_all_record_ids(token, app_token, progress_id)
+    print(f"[飞书] 进度表共 {len(progress_rids)} 条记录")
 
-    # 5. 组合：钢厂订单号 → 编号 → 进度表 record_id → 更新
-    print(f"\n=== 步骤 5/5：在进度表批量更新 '{quasi_field}' 和 '{ship_field}' ===")
     update_records: list[dict] = []
     skipped_no_progress = 0
     multi_count = 0
     for order_no, vals in order_data.items():
-        codes = matched.get(order_no)
-        if not codes:
+        rids = matched.get(order_no)
+        if not rids:
             continue
         found_any = False
-        for code in codes:
-            rids = code_to_rids.get(code, [])
-            for rid in rids:
-                update_records.append({
-                    "record_id": rid,
-                    "fields": {
-                        quasi_field: vals[XLSX_COL_QUASI],
-                        ship_field: vals[XLSX_COL_SHIP],
-                    },
-                })
-                found_any = True
-            if len(rids) > 1:
-                multi_count += 1
+        for rid in rids:
+            if rid not in progress_rids:
+                continue
+            update_records.append({
+                "record_id": rid,
+                "fields": {
+                    quasi_field: vals[XLSX_COL_QUASI],
+                    ship_field: vals[XLSX_COL_SHIP],
+                },
+            })
+            found_any = True
         if not found_any:
             skipped_no_progress += 1
+        if rids and len(rids) > 1:
+            multi_count += 1
 
     if skipped_no_progress:
         print(f"  [提示] {skipped_no_progress} 个订单在合约表有但进度表无对应记录，跳过")
     if multi_count:
-        print(f"  [提示] 有 {multi_count} 个编号在进度表中有多条匹配记录")
+        print(f"  [提示] 有 {multi_count} 个资源号在合约表中有多条匹配记录")
 
     print(f"  实际待更新记录数: {len(update_records)}")
+
+    # 5. 批量更新
+    print(f"\n=== 步骤 5/5：在进度表批量更新 '{quasi_field}' 和 '{ship_field}' ===")
 
     if dry_run:
         print("\n[DRY-RUN] 仅预览，不实际写入。前 10 条:")

@@ -1,12 +1,8 @@
 name: 自动导出库记录并上传飞书云盘
 
 # 触发方式：
-# 1) 每天北京时间 10:00 和 22:00 各执行一次（UTC 2:00 / 14:00）
-# 2) 可在 Actions 页面手动点击 "Run workflow" 立即测试
+# 可在 Actions 页面手动点击 "Run workflow" 立即测试
 on:
-  schedule:
-    - cron: "0 2 * * *"
-    - cron: "0 14 * * *"
   workflow_dispatch:
     inputs:
       reason:

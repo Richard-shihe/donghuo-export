@@ -2,7 +2,7 @@
 
 自动登录 `https://erpa.donghuo.vip` → 识别验证码 → 调接口拉取出库记录 → 生成 CSV → **上传到飞书云盘指定文件夹** → （可选）飞书机器人通知你。
 
-每天北京时间 **10:00** 和 **22:00** 各执行一次（可在 `.github/workflows/export.yml` 的 `cron` 中修改）。
+可在 GitHub Actions 页面手动点击 `Run workflow` 触发执行。
 
 ---
 
@@ -12,7 +12,7 @@
 A/
 ├── export_chuku.py               # 主脚本：登录 / 抓数据 / CSV / 上传飞书云盘 / 通知
 ├── requirements.txt              # Python 依赖（requests、ddddocr）
-└── .github/workflows/export.yml  # GitHub Actions 定时工作流
+└── .github/workflows/export.yml  # GitHub Actions 工作流（手动触发）
 ```
 
 ---
@@ -175,22 +175,7 @@ python export_chuku.py
 
 ---
 
-## 七、修改执行频率
-
-打开 `.github/workflows/export.yml`，修改：
-
-```yaml
-on:
-  schedule:
-    - cron: "0 2 * * *"   # UTC 02:00 = 北京时间 10:00
-    - cron: "0 14 * * *"  # UTC 14:00 = 北京时间 22:00
-```
-
-cron 是 **UTC 时间**，北京时间 = UTC + 8 小时。
-
----
-
-## 八、工作原理（简要）
+## 七、工作原理（简要）
 
 1. **登录**：`POST /controller/admin/c_longin/index`，参数 `u_name` / `u_pass` / `captcha`
 2. **验证码识别**：`GET /common/captcha` → 用 `ddddocr` 识别（识别失败自动重试，最多 10 次）
@@ -203,154 +188,4 @@ cron 是 **UTC 时间**，北京时间 = UTC + 8 小时。
    - `POST /auth/v3/tenant_access_token/internal` 换应用级 token
    - `POST /drive/v1/files/upload_all`（multipart/form-data，`parent_type=explorer` + `parent_node=folder_token`）
 6. **通知**（可选）：通过飞书群自定义机器人 Webhook 发文本消息，附带签名校验
-
----
-
-## 九、欧冶产能预售导出（独立模块）
-
-> 与懂火脚本完全独立，针对 [欧冶平台](https://www.ouyeel.com) 的产能预售明细数据。
-
-### 9.1 与懂火脚本的区别
-
-| 维度 | 懂火脚本 | 欧冶脚本 |
-|------|---------|---------|
-| 数据源 | `erpa.donghuo.vip` | `www.ouyeel.com` |
-| 反爬 | 无 | **瑞数信息（RS-Anti-Bot）**，必须用真浏览器 |
-| 技术方案 | `requests` + ddddocr 识别验证码 | **Playwright** 浏览器自动化 |
-| 登录 | 账号密码 + 图形验证码 | **storage_state cookie 复用**（避开 SSO 登录流程） |
-| 飞书文件夹 | `LD_FOLDER_TOKEN` | `OUYEEL_FOLDER_TOKEN`（不同文件夹） |
-
-### 9.2 文件结构
-
-```
-A/
-├── feishu_uploader/
-│   ├── export_lindiao.py          # 懂火临调库存
-│   └── export_ouyeel.py           # 欧冶产能预售（本节）
-└── .github/workflows/
-    ├── export_lindiao.yml         # 懂火临调 workflow
-    └── export_ouyeel.yml          # 欧冶产能 workflow（本节）
-```
-
-### 9.3 飞书新文件夹准备
-
-欧冶数据上传到**独立于懂火**的飞书文件夹：
-
-1. 在飞书云盘新建一个文件夹（如"欧冶产能预售"）
-2. 按 [3.2 节](#32-获取目标文件夹的-folder-token) 同样方法获取 folder token
-3. 把同一个飞书自建应用加为该文件夹协作者（可编辑）
-4. 把 folder token 存为 GitHub Secret `OUYEEL_FOLDER_TOKEN`
-
-> 飞书 App ID / App Secret / 机器人 Webhook 与懂火脚本**共用同一套**，无需重新创建应用。
-
-### 9.4 生成本地登录态 storage_state（关键步骤）
-
-欧冶用 SSO 登录 + 瑞数信息反爬，CI 环境无法自动登录（Playwright 起的浏览器会被瑞数识别为自动化并返回空白页）。采用 **真实浏览器手动登录 → 导出 cookie → 转成 storage_state** 方案，完全避开 Playwright 被检测的问题。
-
-**首次配置 / cookie 过期后刷新**：
-
-#### 步骤 1：用本机 Chrome/Edge 登录欧冶
-
-打开**你自己的** Chrome 或 Edge（不是 Playwright），访问：
-
-```
-https://login-ng.ouyeel.com/sso/login?service=https://www.ouyeel.com/
-```
-
-手动完成登录（账号密码 / 短信 / 验证码都行）。登录成功后跳到 `www.ouyeel.com` 首页即代表登录成功。
-
-#### 步骤 2：装 Cookie-Editor 扩展（5 秒）
-
-在 Chrome 应用商店装 [Cookie-Editor](https://chromewebstore.google.com/detail/cookie-editor/hlkenndednhfkekhgcdicfkddnncbdoh)（开源、免费、无广告）。Edge 也能装同名扩展。
-
-#### 步骤 3：导出 cookie 为 JSON
-
-1. 登录成功后，停留在 `www.ouyeel.com` 域下任意页面
-2. 点浏览器右上角 Cookie-Editor 扩展图标
-3. 右下角点 **Export** → 选 **Export as JSON**
-4. 自动复制到剪贴板，粘贴到任意文本编辑器，保存为 `cookies.json`（路径随意，比如项目根目录）
-
-#### 步骤 4：转成 storage_state
-
-```bash
-# 安装依赖
-pip install -r requirements.txt
-
-# 转换（会自动过滤只保留 ouyeel.com 相关 cookie）
-python feishu_uploader/cookie_to_state.py cookies.json
-```
-
-执行后自动生成两个文件：
-- `feishu_uploader/.ouyeel_state.json` — Playwright 用的 storage_state
-- `feishu_uploader/.ouyeel_state.json.b64` — base64 编码版（用于 GitHub Secret）
-
-转换脚本会校验：
-- ✅ 是否找到会话类 cookie（SESSION/token 等）
-- ✅ 是否有 cookie 已过期
-- ✅ 是否过滤掉了其他域名的 cookie
-
-> ⚠️ 这两个文件在 `.gitignore` 里，**不会**提交到仓库。
-
-### 9.5 本地测试
-
-```powershell
-# 方式一：仅本地保存 CSV（不传飞书，先验证数据抓取是否正常）
-$env:DELIVERY_MODE = "local"
-python feishu_uploader/export_ouyeel.py
-
-# 方式二：上传飞书云盘
-$env:DELIVERY_MODE       = "feishu"
-$env:FEISHU_APP_ID       = "cli_xxxxxxxxxxxx"
-$env:FEISHU_APP_SECRET   = "xxxxxxxxxxxxxxxxxxxxxxxx"
-$env:FEISHU_FOLDER_TOKEN = "fldcnxxxxxxxxxxxxxxxx"   # 欧冶文件夹 token
-python feishu_uploader/export_ouyeel.py
-```
-
-### 9.6 部署到 GitHub Actions
-
-#### 新增 Secrets
-
-打开仓库 `Settings` → `Secrets and variables` → `Actions` → `Secrets`：
-
-| Secret 名 | 必填 | 说明 |
-|-----------|:---:|------|
-| `OUYEEL_STORAGE_STATE` | ✅ | 上一步 `.ouyeel_state.json.b64` 的完整内容（base64 字符串） |
-| `OUYEEL_FOLDER_TOKEN` | ✅ | 欧冶数据目标飞书文件夹 token |
-| `FEISHU_APP_ID` / `FEISHU_APP_SECRET` | ✅ | 复用现有 |
-| `FEISHU_WEBHOOK_URL` / `FEISHU_WEBHOOK_SECRET` | 可选 | 复用现有，用于告警 |
-
-#### 新增 Variables（可选）
-
-| Variable 名 | 默认 | 说明 |
-|-------------|:----:|------|
-| `OUYEEL_PAGE_SIZE` | `50` | 每页条数 |
-| `OUYEEL_MAX_PAGES` | `10` | 最大页数防失控（288 条 / 50 = 6 页，10 足够） |
-| `OUYEEL_DELIVERY_MODE` | `feishu` | 交付方式 |
-
-#### 手动触发验证
-
-仓库 → `Actions` → 选 **"自动导出欧冶产能预售并上传飞书云盘"** → `Run workflow`
-
-### 9.7 cookie 过期处理
-
-欧冶 cookie 有效期约 **1-7 天**，过期后：
-
-1. 脚本会检测到重定向到 `login-ng.ouyeel.com`，自动通过飞书机器人发告警：
-   ```
-   ❌ 欧冶产能预售导出失败
-   原因: cookie 过期，被重定向到 SSO 登录页
-   请按 README 9.4 节重新导出 cookie 并更新 GitHub Secret OUYEEL_STORAGE_STATE
-   ```
-2. 本地重新走 [9.4 节](#94-生成本地登录态-storage_state关键步骤) 的 4 步流程（用本机 Chrome 登录 → Cookie-Editor 导出 → 跑转换脚本）
-3. 把新生成的 `.ouyeel_state.json.b64` 内容更新到 GitHub Secret `OUYEEL_STORAGE_STATE`
-
-### 9.8 欧冶脚本常见错误
-
-| 现象 | 原因 / 解决 |
-|------|------------|
-| `cookie 过期，被重定向到 SSO 登录页` | storage_state 过期，按 [9.7 节](#97-cookie-过期处理) 刷新 |
-| `[XHR] 未拦到数据 JSON` | 页面结构可能变化；首跑会打印所有 XHR URL，把日志反馈给开发者收窄过滤 |
-| `未抓到任何数据` | 检查 storage_state 是否登录了正确账号；或欧冶改版需调整 DOM 抽取逻辑 |
-| Playwright 安装失败 | 检查 `actions/cache` 是否命中；或 `playwright install --with-deps chromium` 系统依赖缺失 |
-| 上传失败 `99991668` | 飞书应用没加为 `OUYEEL_FOLDER_TOKEN` 对应文件夹的协作者（参照 3.2 第 3 步） |
 

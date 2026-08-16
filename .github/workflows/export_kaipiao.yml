@@ -1,7 +1,6 @@
 name: 自动导出开票申请单(待确认)并写入飞书多维表格
 
 # 触发方式：
-#   - 外部定时服务（cron-job.org）通过 POST /dispatches 调用 workflow_dispatch
 #   - 手动 Run workflow
 on:
   workflow_dispatch:

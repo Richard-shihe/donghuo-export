@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-懂火钢城系统 - 临调库存导出 → 飞书云盘
+懂火钢城系统 - 临调库存导出 → 飞书云盘 / 飞书多维表格
 
 数据来源：库存查询 > 临调库存 页面（v_kucun_ld）的"导出"按钮
 流程：
@@ -9,7 +9,10 @@
   2. 调用导出接口 /view/admin/excelbiao/kucunld，获取服务端返回的 .xls
      （本质是带 mso-number-format 样式的 HTML 表格，Excel 可直接打开）
   3. 解析 HTML 表格为 CSV（UTF-8-SIG 避免 Excel 乱码）
-  4. 上传 CSV 到飞书云盘指定文件夹
+  4. 按需交付：
+     - feishu（默认）：上传 CSV 到飞书云盘指定文件夹
+     - bitable：将数据追加写入飞书多维表格（按字段类型转换，不去重直接 append）
+     - local：仅本地保存 CSV
   5. 可选：飞书机器人 Webhook 通知
 
 环境变量（必填）：
@@ -17,7 +20,13 @@
   DH_PASSWORD           erpa 登录密码
   FEISHU_APP_ID         飞书自建应用 App ID
   FEISHU_APP_SECRET     飞书自建应用 App Secret
-  FEISHU_FOLDER_TOKEN   目标文件夹 token (fldcn...)
+
+环境变量（按交付方式）：
+  DELIVERY_MODE=feishu（默认）需要 FEISHU_FOLDER_TOKEN（目标文件夹 token fldcn...）
+  DELIVERY_MODE=bitable 需要 BITABLE_APP_TOKEN（多维表格 app_token）
+                              BITABLE_TABLE_ID（目标 table id tbl...）
+                       注：飞书应用需对该多维表格有「可编辑」协作者权限
+  DELIVERY_MODE=local   无需额外变量
 
 环境变量（可选）：
   FILTER_SXZHUANTAI     状态筛选: 空(全部) / 已锁 / 未锁
@@ -26,7 +35,6 @@
   FILTER_PINMIN         品名筛选
   FEISHU_WEBHOOK_URL    飞书机器人 Webhook
   FEISHU_WEBHOOK_SECRET 机器人签名密钥
-  DELIVERY_MODE         交付方式: feishu(默认) / local(仅本地保存)
 """
 
 import os
@@ -171,11 +179,12 @@ def export_lindiao(session: requests.Session,
     return r.content, info
 
 
-def html_table_to_csv_bytes(html_bytes: bytes) -> tuple[bytes, int, int]:
+def html_table_to_csv_bytes(html_bytes: bytes) -> tuple[bytes, int, int, list[dict]]:
     """
     将服务端返回的 HTML 表格（伪装 .xls）解析为 CSV 字节。
 
-    返回：(csv 字节 UTF-8-SIG, 行数含表头, 列数)
+    返回：(csv 字节 UTF-8-SIG, 行数含表头, 列数, rows list[dict])
+      rows: 第一行作为表头，后续每行 dict[str, str]，供 bitable 写入使用
     """
     text = html_bytes.decode("utf-8", errors="replace")
 
@@ -211,7 +220,19 @@ def html_table_to_csv_bytes(html_bytes: bytes) -> tuple[bytes, int, int]:
         writer.writerow(row)
     csv_bytes = buf.getvalue().encode("utf-8-sig")
 
-    return csv_bytes, len(rows_data), len(rows_data[0])
+    # 第一行作为表头，后续行转 dict
+    headers = rows_data[0]
+    rows: list[dict] = []
+    for raw in rows_data[1:]:
+        row_dict = {}
+        for i, h in enumerate(headers):
+            if i < len(raw):
+                row_dict[h] = raw[i]
+            else:
+                row_dict[h] = ""
+        rows.append(row_dict)
+
+    return csv_bytes, len(rows_data), len(rows_data[0]), rows
 
 
 # ---------------- 飞书云盘 ----------------
@@ -264,6 +285,140 @@ def feishu_upload_to_folder(token: str, folder_token: str,
     file_token = file_info.get("file_token") or file_info.get("token") or ""
     print(f"[飞书云盘] 上传成功, file_token={file_token}, name={file_info.get('name')}")
     return file_info
+
+
+# ---------------- 飞书多维表格（追加） ----------------
+
+# 临调库存 CSV 字段名 → 字段类型（与多维表格字段同名直接映射）
+# 文本字段：直接传字符串
+# 数字字段：转 float/int（飞书 bitable 数字字段需要 number 类型）
+# 日期字段：转毫秒时间戳
+# 表里其他字段（公式 / lookup / auto_fill / 系统字段）不在此映射中，自动跳过
+BITABLE_FIELD_TYPES: dict[str, str] = {
+    "所属公司": "text", "货权": "text", "品名": "text", "规格": "text",
+    "材质": "text", "产地": "text", "等级": "text", "锌层": "text",
+    "涂料": "text", "结构": "text", "颜色": "text", "米数": "text",
+    "仓库": "text", "库位号": "text", "捆包号": "text", "合同号": "text",
+    "车船号": "text", "提单号": "text", "备注": "text",
+    "件(张)数": "number", "重量": "number", "销售单价": "number",
+    "入库日期": "datetime",
+}
+
+# batch_create 单次最多 500 条
+BITABLE_BATCH_SIZE = 500
+
+
+def _to_bitable_text(val) -> str:
+    s = str(val).strip() if val is not None else ""
+    return s
+
+
+def _to_bitable_number(val):
+    s = str(val).strip() if val is not None else ""
+    if not s:
+        return None
+    try:
+        f = float(s)
+        return int(f) if f == int(f) else f
+    except (ValueError, TypeError):
+        return None
+
+
+def _to_bitable_datetime(val):
+    """日期字符串 → 毫秒时间戳；支持常见格式"""
+    s = str(val).strip() if val is not None else ""
+    if not s:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%Y/%m/%d %H:%M:%S", "%Y/%m/%d"):
+        try:
+            dt = datetime.datetime.strptime(s, fmt)
+            return int(dt.timestamp() * 1000)
+        except ValueError:
+            continue
+    return None
+
+
+def _convert_field(val, ftype: str):
+    if ftype == "text":
+        return _to_bitable_text(val)
+    if ftype == "number":
+        return _to_bitable_number(val)
+    if ftype == "datetime":
+        return _to_bitable_datetime(val)
+    return None
+
+
+def bitable_batch_create(token: str, app_token: str, table_id: str,
+                          records: list[dict]) -> list[dict]:
+    """调 batch_create API，单次最多 500 条，自动分批"""
+    # === DEBUG: 记录每次调用 ===
+    import os as _os
+    debug_file = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
+                                "_debug_batch_create.log")
+    with open(debug_file, "a", encoding="utf-8") as _fp:
+        import datetime as _dt
+        _fp.write(f"[{_dt.datetime.now()}] batch_create called with {len(records)} records\n")
+        if records:
+            sample_bundle = records[0].get("fields", {}).get("捆包号", "")
+            _fp.write(f"  first record 捆包号: {sample_bundle!r}\n")
+    print(f"  [DEBUG] batch_create called with {len(records)} records", flush=True)
+
+    url = (f"{FEISHU_OPEN_BASE}/bitable/v1/apps/{app_token}"
+           f"/tables/{table_id}/records/batch_create")
+    headers = {"Authorization": f"Bearer {token}"}
+    created: list[dict] = []
+    total = len(records)
+    for start in range(0, total, BITABLE_BATCH_SIZE):
+        batch = records[start:start + BITABLE_BATCH_SIZE]
+        r = requests.post(url, headers=headers,
+                          json={"records": batch}, timeout=60)
+        data = r.json()
+        if data.get("code") != 0:
+            raise RuntimeError(
+                f"bitable 批量创建失败: code={data.get('code')}, "
+                f"msg={data.get('msg')}, "
+                f"raw={json.dumps(data, ensure_ascii=False)[:1200]}"
+            )
+        items = (data.get("data") or {}).get("records") or []
+        created.extend(items)
+        print(f"  [bitable] 写入 {start + len(batch)}/{total} (本次 {len(items)} 条)", flush=True)
+    return created
+
+
+def bitable_append_records(token: str, app_token: str, table_id: str,
+                            rows: list[dict]) -> dict:
+    """
+    将临调库存 rows（解析出的 dict 列表）追加到多维表格。
+    字段映射见 BITABLE_FIELD_TYPES；不在此映射的字段自动跳过。
+    不去重，直接 append。
+    """
+    if not rows:
+        print("[bitable] 无数据可写入")
+        return {"created": 0}
+
+    records_payload: list[dict] = []
+    skipped_field_counts: dict[str, int] = {}
+    for row in rows:
+        fields: dict = {}
+        for col_name, ftype in BITABLE_FIELD_TYPES.items():
+            v = _convert_field(row.get(col_name, ""), ftype)
+            # 文本字段空字符串、数字/日期字段 None 都跳过（不写入空值）
+            if v is None or (isinstance(v, str) and not v):
+                continue
+            fields[col_name] = v
+        # 记录哪些 CSV 字段未在映射中（仅第一次出现时打印）
+        for col_name in row.keys():
+            if col_name not in BITABLE_FIELD_TYPES:
+                skipped_field_counts[col_name] = skipped_field_counts.get(col_name, 0) + 1
+        records_payload.append({"fields": fields})
+
+    if skipped_field_counts:
+        print(f"[bitable] 跳过的未映射 CSV 字段: {skipped_field_counts}")
+
+    print(f"[bitable] 准备写入 {len(records_payload)} 条记录到表 {table_id}")
+    created = bitable_batch_create(token, app_token, table_id, records_payload)
+    print(f"[bitable] 成功写入 {len(created)} 条记录")
+    return {"created": len(created), "records": created}
 
 
 # ---------------- 飞书机器人通知（可选） ----------------
@@ -327,6 +482,10 @@ def main() -> int:
     fs_webhook_url = env("FEISHU_WEBHOOK_URL")
     fs_webhook_secret = env("FEISHU_WEBHOOK_SECRET")
 
+    # 多维表格相关（DELIVERY_MODE=bitable 时必填）
+    bitable_app_token = env("BITABLE_APP_TOKEN")
+    bitable_table_id = env("BITABLE_TABLE_ID")
+
     delivery_mode = (env("DELIVERY_MODE") or "feishu").lower()
 
     if not username or not password:
@@ -347,9 +506,9 @@ def main() -> int:
         traceback.print_exc()
         return 3
 
-    # 3) 解析 HTML 表格为 CSV
+    # 3) 解析 HTML 表格为 CSV + rows
     try:
-        csv_bytes, row_count, col_count = html_table_to_csv_bytes(html_bytes)
+        csv_bytes, row_count, col_count, rows = html_table_to_csv_bytes(html_bytes)
     except Exception as exc:
         print(f"[错误] HTML 表格解析失败: {exc}")
         traceback.print_exc()
@@ -359,7 +518,7 @@ def main() -> int:
           f"{len(csv_bytes)/1024:.1f} KB")
 
     now = datetime.datetime.now()
-    filename = f"lindiao_{now.strftime('%Y%m%d_%H%M')}.csv"
+    filename = f"lindiao_{now.strftime('%Y%m%d_%H%M%S')}.csv"
 
     filter_desc = ""
     if filters:
@@ -415,6 +574,40 @@ def main() -> int:
                 print(notify_text)
         except Exception as exc:
             print(f"[错误] 飞书交付失败: {exc}")
+            traceback.print_exc()
+            return 4
+        return 0
+
+    # 交付：飞书多维表格（追加，不去重）
+    if delivery_mode == "bitable":
+        if not (fs_app_id and fs_app_secret):
+            print("[错误] bitable 模式缺少 FEISHU_APP_ID / FEISHU_APP_SECRET")
+            return 4
+        if not (bitable_app_token and bitable_table_id):
+            print("[错误] bitable 模式缺少 BITABLE_APP_TOKEN / BITABLE_TABLE_ID")
+            return 4
+
+        try:
+            token = feishu_tenant_access_token(fs_app_id, fs_app_secret)
+            result = bitable_append_records(
+                token, bitable_app_token, bitable_table_id, rows)
+
+            notify_lines = [f"✅ 临调库存已写入飞书多维表格"] + summary_lines
+            notify_lines.append(f"app_token: {bitable_app_token}")
+            notify_lines.append(f"table_id: {bitable_table_id}")
+            notify_lines.append(f"写入条数: {result.get('created', 0)}")
+            notify_text = "\n".join(notify_lines)
+
+            if fs_webhook_url:
+                try:
+                    feishu_send_bot_text(fs_webhook_url, fs_webhook_secret, notify_text)
+                except Exception as exc:
+                    print(f"[警告] 通知发送失败，但 bitable 写入已完成: {exc}")
+            else:
+                print("\n[通知内容]")
+                print(notify_text)
+        except Exception as exc:
+            print(f"[错误] bitable 写入失败: {exc}")
             traceback.print_exc()
             return 4
         return 0

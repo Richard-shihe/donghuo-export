@@ -77,10 +77,10 @@ class IEC:
 
     Parameters
     ----------
-    username : str, default 'U41634'
-        登录用户名
+    username : str, default ''
+        登录用户名（命令行入口会从环境变量 IBAO_USERNAME 读取）
     password : str, default ''
-        登录密码（从环境变量 IBAO_PASSWORD 读取）
+        登录密码（命令行入口会从环境变量 IBAO_PASSWORD 读取）
     retries : int, default 30
         验证码识别失败的最大重试次数（每次换新验证码）
     manual : bool, default False
@@ -429,7 +429,7 @@ if __name__ == '__main__':
     import argparse
 
     p = argparse.ArgumentParser(description='宝钢 IEC 登录：直达"选择组织"页面')
-    p.add_argument('-u', help='用户名（默认 U41634）')
+    p.add_argument('-u', help='用户名（默认从 IBAO_USERNAME 环境变量读取）')
     p.add_argument('-pw', help='密码（默认从 IBAO_PASSWORD 环境变量读取）')
     p.add_argument('-r', '--retries', type=int, default=30, help='重试次数')
     p.add_argument('-m', '--manual', action='store_true', help='OCR 失败时人工输入')
