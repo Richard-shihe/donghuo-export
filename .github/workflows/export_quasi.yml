@@ -1,14 +1,23 @@
-name: 准发下载 → 上传飞书云盘
+name: 准发下载 → 上传飞书云盘 → 写入进度表
 
 # 触发方式：
 # 可在 Actions 页面手动点击 "Run workflow" 立即触发
+# 步骤顺序：①准发→下载→导出 xlsx  ②上传飞书云盘  ③用同一份 xlsx 更新"进度"表（准发量/出厂量）
 on:
   workflow_dispatch:
     inputs:
       reason:
         description: "手动触发说明（可选）"
         required: false
-        default: "手动立即准发下载"
+        default: "手动立即准发下载 + 更新进度表"
+      dry_run:
+        description: "写入进度表时仅预览匹配（true） 还是 实际写入（false）"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
 
 # 并发控制：同一时刻只跑一个实例
 concurrency:
@@ -16,10 +25,10 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  export-and-upload:
-    name: 从宝钢 IEC 准发菜单"下载" → xlsx → 上传飞书云盘
+  export-upload-update:
+    name: ①准发下载 ②上传云盘 ③写入进度表
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
 
     steps:
       - name: 检出代码
@@ -35,7 +44,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: 运行准发下载脚本 → 自动上传飞书云盘
+      - name: ①② 运行准发下载脚本 → 自动上传飞书云盘（同一份 xlsx 留给下一步写入）
         env:
           # ===== 宝钢 IEC 系统账号（在仓库 Secrets 中配置） =====
           IBAO_USERNAME: ${{ secrets.IBAO_USERNAME }}
@@ -55,7 +64,28 @@ jobs:
           echo "脚本退出码: $EXIT_CODE"
           exit $EXIT_CODE
 
+      - name: ③ 用刚下载的同一份 xlsx → 更新飞书"进度"表（准发量 / 出厂量）
+        env:
+          # ===== 飞书自建应用（在仓库 Secrets 中配置） =====
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+
+          # ===== 多维表格（默认 app_token Tz0XbQVzkaZuJasBwb8cRjkfnoe 已在脚本硬编码） =====
+          BITABLE_APP_TOKEN: ${{ vars.PROGRESS_BITABLE_TOKEN || '' }}
+
+          TZ: "Asia/Shanghai"
+          DRY_RUN_FLAG: ${{ inputs.dry_run }}
+        run: |
+          if [ "$DRY_RUN_FLAG" = "true" ]; then
+            python update_progress_delivery.py --dry-run
+          else
+            python update_progress_delivery.py
+          fi
+          EXIT_CODE=$?
+          echo "脚本退出码: $EXIT_CODE"
+          exit $EXIT_CODE
+
       - name: 失败时告警
         if: failure()
         run: |
-          echo "::warning:: 准发下载失败，请检查 Secrets 配置或 IEC 网站状态 / 验证码识别重试次数"
+          echo "::warning:: 流程失败：请检查 Secrets/IEC 登录状态/飞书多维表字段权限（准发量/出厂量可写）"
