@@ -18,7 +18,7 @@
   FEISHU_APP_SECRET    飞书自建应用 App Secret
 
 环境变量（可选）：
-  BITABLE_APP_TOKEN    多维表格 app_token（分享 URL /base/ 后面那段）
+  BITABLE_APP_TOKEN    多维表格 app_token（可选，覆盖默认 Tz0XbQVzkaZuJasBwb8cRjkfnoe）
 
 用法：
   # 1) 配置飞书凭据（PowerShell）
@@ -64,8 +64,8 @@ except ImportError:
 # ============================================================
 FEISHU_OPEN_BASE = "https://open.feishu.cn/open-apis"
 
-# 多维表格 app_token（从环境变量 BITABLE_APP_TOKEN 读取，勿硬编码）
-DEFAULT_APP_TOKEN = ""
+# 多维表格 app_token（可由环境变量 BITABLE_APP_TOKEN 覆盖）
+DEFAULT_APP_TOKEN = "Tz0XbQVzkaZuJasBwb8cRjkfnoe"
 DEFAULT_TABLE_PROGRESS = "进度"          # 写入目标表
 DEFAULT_TABLE_CONTRACT = "合约"          # 查 record_id 的源表（资源号是 Text，可 filter）
 DEFAULT_FIELD_RESOURCE = "资源号"        # 合约表里用来匹配的字段（Text 类型）
