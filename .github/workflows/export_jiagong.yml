@@ -7,7 +7,7 @@ on:
         description: "预览模式（不实际写飞书）"
         required: false
         type: boolean
-        default: false
+        default: true
       since:
         description: "只处理加工单号 >= 这个值的（留空=全部）"
         required: false
@@ -54,8 +54,9 @@ jobs:
           TZ: "Asia/Shanghai"
         run: |
           ARGS=""
-          if [ "${{ inputs.dry_run }}" = "true" ]; then
+          if [ "${{ fromJSON(inputs.dry_run) }}" = "true" ] || [ -z "${{ inputs.dry_run }}" ]; then
             ARGS="$ARGS --dry-run"
+            echo "⚠️  预览模式开启，不会实际写飞书（如需写入，请将 dry_run 设为 false）"
           fi
           if [ -n "${{ inputs.since }}" ]; then
             ARGS="$ARGS --since ${{ inputs.since }}"
@@ -63,7 +64,7 @@ jobs:
           if [ -n "${{ inputs.limit }}" ]; then
             ARGS="$ARGS --limit ${{ inputs.limit }}"
           fi
-          echo "运行参数: $ARGS"
+          echo "最终参数: $ARGS"
           python export_jiagong.py $ARGS
           EXIT_CODE=$?
           echo "脚本退出码: $EXIT_CODE"

@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "预览模式（不实际写懂火）"
+        description: "预览模式（不实际写懂火，默认开启；写入请手动改为 false）"
         required: false
         type: boolean
         default: true
@@ -50,14 +50,14 @@ jobs:
           TZ: "Asia/Shanghai"
         run: |
           ARGS=""
-          if [ "${{ inputs.dry_run }}" = "true" ]; then
+          if [ "${{ fromJSON(inputs.dry_run) }}" = "true" ] || [ -z "${{ inputs.dry_run }}" ]; then
             ARGS="$ARGS --dry-run"
+            echo "⚠️  预览模式开启，不会实际写懂火、不会回写飞书状态（如需写入，请将 dry_run 设为 false）"
           fi
           if [ -n "${{ inputs.limit }}" ]; then
-            IMPORT_LIMIT="${{ inputs.limit }}"
-            export IMPORT_LIMIT
+            export IMPORT_LIMIT="${{ inputs.limit }}"
           fi
-          echo "运行参数: $ARGS"
+          echo "最终参数: $ARGS  IMPORT_LIMIT=${IMPORT_LIMIT}"
           python import_finished.py $ARGS
           EXIT_CODE=$?
           echo "脚本退出码: $EXIT_CODE"
