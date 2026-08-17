@@ -13,23 +13,11 @@
   4. 上传到飞书云盘 10 个独立子文件夹（环境变量分别配置）
   5. 通过飞书机器人发送汇总通知
 
-环境变量（必填）：
+环境变量（必填，仓库 Secrets 注入）：
   DH_USERNAME           erpa 登录账号
   DH_PASSWORD           erpa 登录密码
   FEISHU_APP_ID         飞书自建应用 App ID
   FEISHU_APP_SECRET     飞书自建应用 App Secret
-
-环境变量（10 个云盘子文件夹 token，每个对应一类业务）：
-  FEISHU_BACKUP_FOLDER_CHUKU   出库记录
-  FEISHU_BACKUP_FOLDER_KUCUN   库存
-  FEISHU_BACKUP_FOLDER_XSDD    销售订单
-  FEISHU_BACKUP_FOLDER_XSMX    销售订单明细汇总
-  FEISHU_BACKUP_FOLDER_CGDD    采购订单
-  FEISHU_BACKUP_FOLDER_CGMX    采购订单明细汇总
-  FEISHU_BACKUP_FOLDER_SFQR    收付确认
-  FEISHU_BACKUP_FOLDER_YSJS    应收结算
-  FEISHU_BACKUP_FOLDER_FYGL    费用管理
-  FEISHU_BACKUP_FOLDER_KPMX    开票明细
 
 环境变量（可选）：
   FEISHU_WEBHOOK_URL       飞书机器人 Webhook（发送汇总通知）
@@ -37,6 +25,11 @@
   BACKUP_PAGE_SIZE         分页每页条数（默认 200；服务端上限约 300，超过会丢数据）
   BACKUP_DRY_RUN           =1 时仅生成 XLSX 到本地，不上传云盘
   TZ                       Asia/Shanghai
+
+说明：
+  10 个业务对应的飞书云盘子文件夹 token 已直接写在本文件 TASKS 配置里，
+  无需再通过环境变量注入（减少 Secrets 配置量）。
+  如日后需要换文件夹，直接改 TASKS 中各条目的 folder_token 即可。
 
 注意：
   - 服务端对单页返回数有上限（约 300 条），且 offset = page * limit 用的是我们传的 limit。
@@ -79,10 +72,15 @@ FEISHU_OPEN_BASE = "https://open.feishu.cn/open-apis"
 DATE_FMT = "%Y%m%d_%H%M%S"
 
 # 10 类业务接口配置（与 apis.json 同步）
+# folder_token：飞书云盘子文件夹 token，已直接写死在此，不用再配 GitHub Secrets
+#   对应关系：出库=Uuu0feVP... / 库存=LaBjfwhE... / 销售订单=JCm8fVnN... /
+#             销售明细=P30pfKZF... / 采购订单=Mrf3fb7f... / 采购明细=ElTnfu6C... /
+#             收付确认=APyCfFjQ... / 应收结算=L5TufudK... / 费用管理=LZxofXoc... /
+#             开票明细=JvZMfAgn...
 TASKS = [
     {
         "biz": "出库记录",
-        "folder_env": "FEISHU_BACKUP_FOLDER_CHUKU",
+        "folder_token": "Uuu0feVP0lbzEydQaLQcElJ9nVg",
         "api_type": "json_paged",
         "api_path": "/model/admin/xiaoshou/m_xiaoshou/xjilulist",
         "page_param": "page",
@@ -93,7 +91,7 @@ TASKS = [
     },
     {
         "biz": "库存",
-        "folder_env": "FEISHU_BACKUP_FOLDER_KUCUN",
+        "folder_token": "LaBjfwhEMlY0Hcdl0smczvcVnEd",
         "api_type": "html_export",
         "api_path": "/view/admin/excelbiao/kucungl",
         "filename_prefix": "kucun",
@@ -101,7 +99,7 @@ TASKS = [
     },
     {
         "biz": "销售订单",
-        "folder_env": "FEISHU_BACKUP_FOLDER_XSDD",
+        "folder_token": "JCm8fVnNalN1UGd2nmxczS6SnMd",
         "api_type": "json_paged",
         "api_path": "/model/admin/xiaoshou/m_dindan/getlist",
         "page_param": "page",
@@ -112,7 +110,7 @@ TASKS = [
     },
     {
         "biz": "销售订单明细汇总",
-        "folder_env": "FEISHU_BACKUP_FOLDER_XSMX",
+        "folder_token": "P30pfKZFQlzDbBduojfc6DDHnFe",
         "api_type": "json_paged",
         "api_path": "/model/admin/xiaoshou/m_dindan/mxlist",
         "page_param": "page",
@@ -123,7 +121,7 @@ TASKS = [
     },
     {
         "biz": "采购订单",
-        "folder_env": "FEISHU_BACKUP_FOLDER_CGDD",
+        "folder_token": "Mrf3fb7fEl5CVqdwgwqcWn8qnmd",
         "api_type": "json_paged",
         "api_path": "/model/admin/caigou/m_dindan/getlist",
         "page_param": "page",
@@ -134,7 +132,7 @@ TASKS = [
     },
     {
         "biz": "采购订单明细汇总",
-        "folder_env": "FEISHU_BACKUP_FOLDER_CGMX",
+        "folder_token": "ElTnfu6CvlVfbNdxndycPJUGnTd",
         "api_type": "json_paged",
         "api_path": "/model/admin/caigou/m_dindan/mxlist",
         "page_param": "page",
@@ -145,7 +143,7 @@ TASKS = [
     },
     {
         "biz": "收付确认",
-        "folder_env": "FEISHU_BACKUP_FOLDER_SFQR",
+        "folder_token": "APyCfFjQ4lO7PxdFblucyWeAnXe",
         "api_type": "json_paged",
         "api_path": "/model/admin/caiwu/m_liushui/getlist",
         "page_param": "page",
@@ -156,7 +154,7 @@ TASKS = [
     },
     {
         "biz": "应收结算",
-        "folder_env": "FEISHU_BACKUP_FOLDER_YSJS",
+        "folder_token": "L5TufudKAluIrBduRtIcwACjnXd",
         "api_type": "json_paged",
         "api_path": "/model/admin/caiwu/m_yinshou/getlist",
         "page_param": "page",
@@ -168,7 +166,7 @@ TASKS = [
     },
     {
         "biz": "费用管理",
-        "folder_env": "FEISHU_BACKUP_FOLDER_FYGL",
+        "folder_token": "LZxofXocflINVGdngtacqJWvnbe",
         "api_type": "json_paged",
         "api_path": "/model/admin/caiwu/m_feiyon/getlist",
         "page_param": "page",
@@ -179,7 +177,7 @@ TASKS = [
     },
     {
         "biz": "开票明细",
-        "folder_env": "FEISHU_BACKUP_FOLDER_KPMX",
+        "folder_token": "JvZMfAgnulJUWBdHVLpclXTTn4f",
         "api_type": "json_paged",
         "api_path": "/model/admin/caiwu/m_fapiao/mxlist_x",
         "page_param": "page",
@@ -676,12 +674,12 @@ def main() -> int:
     for idx, task in enumerate(TASKS, 1):
         biz = task["biz"]
         print(f"\n[{idx}/{len(TASKS)}] === {biz} ===")
-        folder_token = env(task["folder_env"])
+        folder_token = task.get("folder_token", "")
         if not dry_run and not folder_token:
-            print(f"  [跳过] 未配置 {task['folder_env']}")
+            print(f"  [跳过] 未在 TASKS 中配置 folder_token")
             summary.append({
                 "biz": biz, "status": "SKIP_NO_FOLDER",
-                "reason": f"未配置环境变量 {task['folder_env']}",
+                "reason": "TASKS 中该条目缺少 folder_token",
             })
             continue
 
@@ -743,7 +741,7 @@ def main() -> int:
 
             # 上传飞书
             if not folder_token:
-                print(f"  [跳过] 未配置 {task['folder_env']}")
+                print(f"  [跳过] 未在 TASKS 中配置 folder_token")
                 summary.append({
                     "biz": biz, "status": "SKIP_NO_FOLDER",
                     "rows": rows_count, "filename": filename,
