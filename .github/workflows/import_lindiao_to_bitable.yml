@@ -1,0 +1,154 @@
+name: IEC 准发 - 捆包 → 飞书多维表（中间表）
+
+# 业务流程（两段式）第一段：
+#   1. 飞书 Bitable 自动建 27 列字段
+#   2. IEC 拉捆包级数据
+#   3. 按捆包号去重后写入多维表「入库管理」
+# 不写懂火，仅作中间表供人工审核。
+# 第二段（飞书 → 懂火）后续讨论。
+#
+# 触发：Actions 页面手动 "Run workflow"
+# Secrets 复用：IBAO_* / FEISHU_*（已在仓库配置）
+# 前置：飞书应用 cli_aaf0ce1e9ef89d27 已加为 Bitable OSuobf2ZkaWtUAsXEE9c3aBTnwh 可编辑协作者
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "预览模式：只打印计划，不实际写多维表"
+        type: boolean
+        required: false
+        default: false
+      limit:
+        description: "最多写入 N 条（留空=不限制，调试用）"
+        type: string
+        required: false
+        default: ""
+      no_dedup:
+        description: "关闭捆包号去重（允许重复写入）"
+        type: boolean
+        required: false
+        default: false
+      start_month:
+        description: "IEC 起始月份 YYYYMM（留空用默认：当前月前 3 月）"
+        type: string
+        required: false
+        default: ""
+      end_month:
+        description: "IEC 结束月份 YYYYMM（留空用默认：当前月后 1 月）"
+        type: string
+        required: false
+        default: ""
+
+# 并发控制：同一时刻只跑一个实例
+concurrency:
+  group: iec-bundle-to-bitable
+  cancel-in-progress: false
+
+jobs:
+  import-to-bitable:
+    name: IEC bundle → 飞书多维表
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 安装 Python 依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 运行 import_lindiao_to_bitable.py
+        env:
+          # ===== 宝钢 IEC 账号（复用仓库 Secrets） =====
+          IBAO_USERNAME: ${{ secrets.IBAO_USERNAME }}
+          IBAO_PASSWORD: ${{ secrets.IBAO_PASSWORD }}
+
+          # ===== 飞书自建应用（复用仓库 Secrets） =====
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+
+          # ===== 飞书机器人通知（可选） =====
+          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
+          FEISHU_WEBHOOK_SECRET: ${{ secrets.FEISHU_WEBHOOK_SECRET }}
+
+          # ===== 目标多维表（用户指定的中间表，硬编码默认值） =====
+          BITABLE_APP_TOKEN: OSuobf2ZkaWtUAsXEE9c3aBTnwh
+          BITABLE_TABLE_ID: tblrhqzHuTsAprU3
+
+          # ===== 时区 =====
+          TZ: Asia/Shanghai
+        run: |
+          set -e
+
+          # 检查必填 Secrets
+          if [ -z "$IBAO_USERNAME" ] || [ -z "$IBAO_PASSWORD" ]; then
+            echo "::error:: 缺少 IBAO_USERNAME / IBAO_PASSWORD Secrets"
+            exit 1
+          fi
+          if [ -z "$FEISHU_APP_ID" ] || [ -z "$FEISHU_APP_SECRET" ]; then
+            echo "::error:: 缺少 FEISHU_APP_ID / FEISHU_APP_SECRET Secrets"
+            exit 1
+          fi
+          echo "=== Secrets 检查通过 ==="
+          echo "IBAO_USERNAME: ${IBAO_USERNAME:0:3}***"
+          echo "FEISHU_APP_ID: ${FEISHU_APP_ID:0:7}***"
+          echo ""
+
+          # 从 inputs 读参数（在 set -e 后再展开，避免未设置时退出）
+          DRY_RUN_INPUT="${{ inputs.dry_run }}"
+          LIMIT_INPUT="${{ inputs.limit }}"
+          NO_DEDUP_INPUT="${{ inputs.no_dedup }}"
+          START_MONTH="${{ inputs.start_month }}"
+          END_MONTH="${{ inputs.end_month }}"
+
+          # 构造命令行参数
+          ARGS=""
+          if [ "$DRY_RUN_INPUT" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          if [ -n "$LIMIT_INPUT" ]; then
+            ARGS="$ARGS --limit $LIMIT_INPUT"
+          fi
+          if [ "$NO_DEDUP_INPUT" = "true" ]; then
+            ARGS="$ARGS --no-dedup"
+          fi
+          if [ -n "$START_MONTH" ]; then
+            ARGS="$ARGS --start $START_MONTH"
+          fi
+          if [ -n "$END_MONTH" ]; then
+            ARGS="$ARGS --end $END_MONTH"
+          fi
+
+          echo "=== 运行命令 ==="
+          echo "python import_lindiao_to_bitable.py $ARGS"
+          echo ""
+          python import_lindiao_to_bitable.py $ARGS
+
+      - name: 失败时告警
+        if: failure()
+        run: |
+          echo "::warning:: 流程失败：请检查日志"
+          echo "常见原因："
+          echo "1. 飞书应用 cli_aaf0ce1e9ef89d27 未加为 Bitable OSuobf2ZkaWtUAsXEE9c3aBTnwh 可编辑协作者 → 99991668"
+          echo "2. IEC 账号密码错误或失效"
+          echo "3. 飞书应用未开通 bitable:app 权限"
+          echo "4. 字段权限未授权（写入成功但字段值为空）→ 多维表「字段权限管理」对所有字段对应用授权读写"
+
+      - name: 上传 audit CSV 留底
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lindiao-import-audit
+          path: |
+            lindiao_import_audit_*.csv
+            _debug_batch_create.log
+          if-no-files-found: ignore
+          retention-days: 30
