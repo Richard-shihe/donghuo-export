@@ -46,8 +46,10 @@ jobs:
           DELIVERY_MODE: ${{ vars.LD_DELIVERY_MODE || 'both' }}
 
           # ===== 懂火系统账号（在仓库 Secrets 中配置） =====
-          DH_USERNAME: ${{ secrets.DH_USERNAME }}
-          DH_PASSWORD: ${{ secrets.DH_PASSWORD }}
+          # 注：DH1_xxx 是旧账号 HONG@shihe.donghuo，已在 GitHub Actions 上建立境外 IP 信任（8/13 验证可拿数据）
+          #     DH_xxx 是新账号 R@shihe.donghuo，本地可用但 GitHub Actions 上被风控返回 0 条
+          DH_USERNAME: ${{ secrets.DH1_USERNAME }}
+          DH_PASSWORD: ${{ secrets.DH1_PASSWORD }}
 
           # ===== 飞书自建应用凭证（在仓库 Secrets 中配置） =====
           FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
