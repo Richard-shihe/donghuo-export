@@ -59,10 +59,29 @@ jobs:
           # 时区（确保文件名时间、日期范围正确）
           TZ: "Asia/Shanghai"
         run: |
+          set -e
+          # 检查必填 Secrets
+          if [ -z "$IBAO_USERNAME" ] || [ -z "$IBAO_PASSWORD" ]; then
+            echo "::error:: 缺少 IBAO_USERNAME / IBAO_PASSWORD Secrets，请在仓库 Settings → Secrets 中配置"
+            exit 1
+          fi
+          if [ -z "$FEISHU_APP_ID" ] || [ -z "$FEISHU_APP_SECRET" ]; then
+            echo "::error:: 缺少 FEISHU_APP_ID / FEISHU_APP_SECRET Secrets"
+            exit 1
+          fi
+          echo "=== Secrets 检查通过 ==="
+          echo "IBAO_USERNAME: ${IBAO_USERNAME:0:3}***"
+          echo "FEISHU_APP_ID: ${FEISHU_APP_ID:0:7}***"
+
+          # 运行下载脚本
           python download_bundle.py
-          EXIT_CODE=$?
-          echo "脚本退出码: $EXIT_CODE"
-          exit $EXIT_CODE
+
+          # 确认 xlsx 已生成
+          echo "=== 检查生成的 xlsx 文件 ==="
+          ls -la 准发下载_*.xlsx || {
+            echo "::error:: download_bundle.py 执行完成但未生成 xlsx 文件，请检查上面的日志"
+            exit 1
+          }
 
       - name: ③ 用刚下载的同一份 xlsx → 更新飞书"进度"表（准发量 / 出厂量）
         env:
@@ -76,14 +95,17 @@ jobs:
           TZ: "Asia/Shanghai"
           DRY_RUN_FLAG: ${{ inputs.dry_run }}
         run: |
+          set -e
+          # 确认 xlsx 存在（虽然 step 1 已检查，这里再保险一次）
+          ls 准发下载_*.xlsx || {
+            echo "::error:: 上一步未生成 xlsx 文件，无法更新进度表"
+            exit 1
+          }
           if [ "$DRY_RUN_FLAG" = "true" ]; then
             python update_progress_delivery.py --dry-run
           else
             python update_progress_delivery.py
           fi
-          EXIT_CODE=$?
-          echo "脚本退出码: $EXIT_CODE"
-          exit $EXIT_CODE
 
       - name: 失败时告警
         if: failure()
