@@ -64,7 +64,10 @@ jobs:
           BITABLE_APP_TOKEN: "IRCzb5XVganwbUsz9NKcaC0SnRA"
           BITABLE_TABLE_ID: "tblaHMNprLueWYDP"
 
-          # ===== 通知机器人 Webhook（可选，所有模式通用） =====
+          # ===== 通知机器人（IM API 优先，Webhook 备选） =====
+          # IM API：自建应用已加入群 chat_id（推荐，无需额外建 Webhook 机器人）
+          FEISHU_CHAT_ID: ${{ secrets.FEISHU_CHAT_ID }}
+          # Webhook 备选方案（与 IM API 二选一即可）
           FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
           FEISHU_WEBHOOK_SECRET: ${{ secrets.FEISHU_WEBHOOK_SECRET }}
 

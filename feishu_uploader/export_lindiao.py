@@ -899,6 +899,26 @@ def _feishu_sign(secret: str, timestamp: str) -> str:
     return _b64.b64encode(h.digest()).decode("utf-8")
 
 
+def feishu_send_im_text(token: str, chat_id: str, text: str) -> None:
+    """
+    用自建应用 tenant_access_token 通过 IM API 向指定 chat_id 群发文本消息。
+    需要：应用已开启"机器人"能力 + 已被加入目标群 + im:message:send_as_bot 权限。
+    """
+    url = f"{FEISHU_OPEN_BASE}/im/v1/messages?receive_id_type=chat_id"
+    headers = {"Authorization": f"Bearer {token}"}
+    payload = {
+        "receive_id": chat_id,
+        "msg_type": "text",
+        "content": json.dumps({"text": text}, ensure_ascii=False),
+    }
+    r = requests.post(url, headers=headers, json=payload, timeout=15)
+    data = r.json()
+    if data.get("code") != 0:
+        raise RuntimeError(f"IM API 发消息失败: code={data.get('code')}, "
+                           f"msg={data.get('msg')}, raw={data}")
+    print(f"[飞书通知] IM API 发送成功 (chat_id={chat_id})")
+
+
 def feishu_send_bot_text(webhook_url: str, secret: str, text: str) -> None:
     body = {"msg_type": "text", "content": {"text": text}}
     if secret:
@@ -944,7 +964,8 @@ def main() -> int:
     fs_app_id = env("FEISHU_APP_ID")
     fs_app_secret = env("FEISHU_APP_SECRET")
     fs_folder_token = env("FEISHU_FOLDER_TOKEN")
-    fs_webhook_url = env("FEISHU_WEBHOOK_URL")
+    fs_chat_id = env("FEISHU_CHAT_ID")              # IM API 通知：应用已加入的群 chat_id
+    fs_webhook_url = env("FEISHU_WEBHOOK_URL")      # 备选：自定义机器人 Webhook
     fs_webhook_secret = env("FEISHU_WEBHOOK_SECRET")
 
     # 多维表格相关（DELIVERY_MODE=bitable 时必填）
@@ -1149,12 +1170,23 @@ def main() -> int:
             filter_desc=filter_desc,
         )
 
-        if fs_webhook_url:
+        # 通知发送：优先 IM API（chat_id），fallback Webhook，都没有则打印日志
+        notified = False
+        if fs_chat_id and fs_token:
+            try:
+                feishu_send_im_text(fs_token, fs_chat_id, notify_text)
+                notified = True
+            except Exception as exc:
+                print(f"[警告] IM API 通知发送失败: {exc}")
+
+        if not notified and fs_webhook_url:
             try:
                 feishu_send_bot_text(fs_webhook_url, fs_webhook_secret, notify_text)
+                notified = True
             except Exception as exc:
-                print(f"[警告] 通知发送失败: {exc}")
-        else:
+                print(f"[警告] Webhook 通知发送失败: {exc}")
+
+        if not notified:
             print("\n[通知内容]")
             print(notify_text)
 
