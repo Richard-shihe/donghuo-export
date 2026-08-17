@@ -130,10 +130,6 @@ def login(session: requests.Session, username: str, password: str,
             result = json.loads(text)
             if isinstance(result, dict) and str(result.get("code")) == "200":
                 print("[登录] 成功")
-                # === DEBUG: 登录后的 cookies ===
-                print(f"[DEBUG] 登录响应后 session cookies: {list(session.cookies.keys())}")
-                for ck in session.cookies:
-                    print(f"  - {ck.name} (len={len(ck.value) if ck.value else 0}, domain={ck.domain})")
                 return True
             msg = result.get("msg") or result.get("message") or text[:100]
             print(f"  失败: {msg}")
@@ -147,55 +143,59 @@ def login(session: requests.Session, username: str, password: str,
 
 # ---------------- 临调库存导出 ----------------
 
+# 临调库存页面 JSON 列表分页接口（前端 grid 展示用）
+# 格式: {"pgtotal":N, "rtotal":M, "root":[{row dict}, ...]}
+# 比 Excel 导出接口更稳定，境外 IP 不会被过滤成 0 条
+LINDIAO_LIST_API = f"{BASE_URL}/model/admin/xiaoshou/m_kucun/ld_kucun"
+
+# 与 EXCEL 导出接口一致的 23 列 CSV 列头顺序（CSV 按此顺序写，保持向下兼容）
+# 说明：
+#   - list API 的 JSON 字段名是中文，和 Excel 导出的 <td> 表头基本一致
+#   - list API 有 40+ 个字段，CSV 只保留和旧 Excel 相同的 23 列
+#   - list API 里叫 "重量(吨)"，Excel 导出版叫 "重量" → 下面映射处理
+#   - list API 缺少 "销售单价" 列（字段可售件数/可售重量存在但销售单价值为 0），保持空
+CSV_HEADER_ORDER = [
+    "所属公司", "货权", "品名", "规格", "材质", "产地", "等级", "锌层",
+    "涂料", "结构", "颜色", "件(张)数", "米数", "重量",
+    "销售单价", "仓库", "库位号", "捆包号", "合同号", "车船号",
+    "提单号", "备注", "入库日期",
+]
+
+# list API 字段名 → CSV 字段名映射（只处理不一致的）
+_LIST2CSV_ALIAS = {
+    "重量(吨)": "重量",
+}
+
+# bitable 写入时用的字段（和飞书多维表格实际字段对齐），从 rows 保留这些 key 即可
+# 说明：CSV_HEADER_ORDER 23 列正好对应多维表格里的 23 个字段
+BITABLE_WRITE_FIELDS = CSV_HEADER_ORDER
+
+
+def _preheat_pages(session: requests.Session) -> None:
+    """访问框架页和子页，预热会话状态（与 Excel 导出保持一致行为）"""
+    try:
+        session.get(LINDIAO_FRAME_PAGE, timeout=15)
+        session.get(LINDIAO_PAGE, timeout=15)
+    except Exception as exc:
+        print(f"  [警告] 访问页面预热线: {exc}")
+
+
 def export_lindiao(session: requests.Session,
                   filters: dict | None = None,
                   timeout: int = 120) -> tuple[bytes, dict]:
     """
-    调用"导出按钮"对应接口，返回 (HTML 表格字节, 元信息)。
+    调用"导出按钮"对应接口（Excel 导出），返回 (HTML 表格字节, 元信息)。
 
     接口：POST /view/admin/excelbiao/kucunld
     返回：Content-Type=Application/x-msexcel，本质是 HTML 表格伪装为 .xls
 
-    filters: 可选筛选 dict（对应 form1 表单字段），如:
-        {"sxzhuantai": "已锁", "huoquan": "拥有", "canku": "仲鼎库"}
+    注意：境外 IP（如 GitHub Actions Azure 美国机房）访问时，懂火服务端可能返回
+    "只有表头、0 条数据"的空结果。此场景应优先使用 export_lindiao_listapi()。
     """
-    # === DEBUG: 登录态检查 ===
-    print(f"[DEBUG] session cookies: {list(session.cookies.keys())}")
-    for ck in session.cookies:
-        # 只打印 cookie name 和长度，不打印 value（安全）
-        print(f"  - {ck.name} (len={len(ck.value) if ck.value else 0}, domain={ck.domain})")
+    _preheat_pages(session)
 
-    # 先访问外层框架页与内层页面，建立 Referer / 会话状态
-    try:
-        print(f"[DEBUG] GET 框架页 {LINDIAO_FRAME_PAGE}")
-        r_frame = session.get(LINDIAO_FRAME_PAGE, timeout=15)
-        print(f"  HTTP {r_frame.status_code}, final_url={r_frame.url}, size={len(r_frame.content)} bytes")
-        # 检查是否被重定向到登录页
-        if "login" in r_frame.url.lower() or "登录" in r_frame.text[:500]:
-            print(f"  [警告] 框架页被重定向到登录页！response 前 300 字符:")
-            print(f"  {r_frame.text[:300]}")
-
-        print(f"[DEBUG] GET 子页 {LINDIAO_PAGE}")
-        r_page = session.get(LINDIAO_PAGE, timeout=15)
-        print(f"  HTTP {r_page.status_code}, final_url={r_page.url}, size={len(r_page.content)} bytes")
-        if "login" in r_page.url.lower() or "登录" in r_page.text[:500]:
-            print(f"  [警告] 子页被重定向到登录页！response 前 300 字符:")
-            print(f"  {r_page.text[:300]}")
-        else:
-            # 打印子页前 200 字符看是不是有数据/正常加载
-            print(f"  子页前 200 字符: {r_page.text[:200]}")
-    except Exception as exc:
-        print(f"  [警告] 访问页面预热线: {exc}")
-
-    # === DEBUG: 导出请求 ===
     data = filters or {}
-    print(f"[导出] POST {EXPORT_API} (筛选: {data or '无'})")
-    # 打印请求头
-    print(f"[DEBUG] 请求 headers:")
-    for k, v in session.headers.items():
-        if k.lower() in ("user-agent", "accept-language", "referer", "cookie"):
-            print(f"  {k}: {v[:80] if isinstance(v, str) else v}")
-
+    print(f"[导出-Excel] POST {EXPORT_API} (筛选: {data or '无'})")
     r = session.post(EXPORT_API, data=data, timeout=timeout, allow_redirects=True)
     if r.status_code != 200:
         raise RuntimeError(f"导出接口返回 HTTP {r.status_code}")
@@ -208,16 +208,100 @@ def export_lindiao(session: requests.Session,
     }
     print(f"  HTTP {r.status_code}, Content-Type={info['content_type']}, "
           f"size={info['size_kb']} KB")
-    # === DEBUG: 打印响应前 500 字符 ===
-    try:
-        resp_preview = r.content.decode("utf-8", errors="replace")[:500]
-        print(f"[DEBUG] 响应前 500 字符:\n{resp_preview}")
-        # 统计 <tr> 数量
-        tr_count = len(re.findall(r'<tr', resp_preview, flags=re.I))
-        print(f"[DEBUG] 前 500 字符中 <tr> 数量: {tr_count}")
-    except Exception as e:
-        print(f"[DEBUG] 解码响应失败: {e}")
     return r.content, info
+
+
+def export_lindiao_listapi(session: requests.Session,
+                           filters: dict | None = None,
+                           timeout: int = 120,
+                           ) -> tuple[list[dict], bytes, int, int]:
+    """
+    通过列表 JSON API 拉取临调库存（替代 Excel 导出接口的优先方案）。
+
+    接口：POST /model/admin/xiaoshou/m_kucun/ld_kucun
+    必须带上的 body：page, limit, sxzhuantai, huoquan, canku, pinmin
+      （PHP 代码直接引用 $sxzhuantai 等变量，不传会 Fatal error）
+
+    返回：
+      (rows, csv_bytes, row_count_with_header, col_count)
+        rows                 : list[dict]，每个 dict 的 key 是 CSV_HEADER_ORDER 中的字段名
+                               （与 Excel 导出 html_table_to_csv_bytes 的 rows 格式一致）
+        csv_bytes            : 按 CSV_HEADER_ORDER 写的 CSV (UTF-8-SIG)
+        row_count_with_header: len(rows)+1（与 html_table_to_csv_bytes 的返回值对齐）
+        col_count            : len(CSV_HEADER_ORDER)（与 Excel 导出 23 列一致）
+    """
+    _preheat_pages(session)
+
+    user_filters = filters or {}
+    # 列表 API PHP 代码要求必须存在这 4 个筛选字段（空值 = 不过滤）
+    payload = {
+        "page": 1,
+        "limit": 500,
+        "sxzhuantai": user_filters.get("sxzhuantai", "") or "",
+        "huoquan":    user_filters.get("huoquan", "")    or "",
+        "canku":      user_filters.get("canku", "")      or "",
+        "pinmin":     user_filters.get("pinmin", "")     or "",
+    }
+    print(f"[导出-ListAPI] POST {LINDIAO_LIST_API} (筛选: {user_filters or '无'})")
+
+    all_rows: list[dict] = []
+    page = 1
+    while True:
+        payload["page"] = page
+        r = session.post(LINDIAO_LIST_API, data=payload, timeout=timeout)
+        if r.status_code != 200:
+            raise RuntimeError(f"列表 API 返回 HTTP {r.status_code}")
+        # 懂火返回的 Content-Type=text/html，但内容其实是 JSON
+        try:
+            data = json.loads(r.text)
+        except json.JSONDecodeError as exc:
+            # 不是 JSON → PHP error / login redirect / 被风控 → 抛异常让上层回退 Excel 导出
+            raise RuntimeError(
+                f"列表 API 返回非 JSON: {exc}; resp前300={r.text[:300]!r}"
+            ) from exc
+
+        root = data.get("root") or []
+        if not isinstance(root, list):
+            raise RuntimeError(f"列表 API root 不是 list: {type(root).__name__}")
+        rtotal = data.get("rtotal")
+        pgtotal = data.get("pgtotal")
+        all_rows.extend(root)
+        print(f"  page {page}: {len(root)} 条, 累计 {len(all_rows)} 条, rtotal={rtotal}, pgtotal={pgtotal}")
+
+        if len(root) < payload["limit"]:
+            break
+        if pgtotal and page >= pgtotal:
+            break
+        page += 1
+        time.sleep(0.15)
+
+    # 把 list API 字段名（可能含 "重量(吨)" 等）→ 对齐 CSV_HEADER_ORDER 的字段名
+    rows_aligned: list[dict] = []
+    for raw in all_rows:
+        if not isinstance(raw, dict):
+            continue
+        # 先做 alias 映射
+        mapped = {}
+        for k, v in raw.items():
+            new_k = _LIST2CSV_ALIAS.get(k, k)
+            # list API 数字字段有些是 int/float（如 重量(吨)=27.11），CSV 统一转字符串
+            mapped[new_k] = "" if v is None else str(v)
+        # 按 CSV_HEADER_ORDER 取字段，缺失的填空（保证 23 列和老 CSV 一致）
+        row_out = {h: mapped.get(h, "") for h in CSV_HEADER_ORDER}
+        rows_aligned.append(row_out)
+
+    # 生成 CSV (UTF-8-SIG，和 Excel 导出保持一致)
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(CSV_HEADER_ORDER)
+    for row in rows_aligned:
+        writer.writerow([row[h] for h in CSV_HEADER_ORDER])
+    csv_bytes = buf.getvalue().encode("utf-8-sig")
+
+    row_count = len(rows_aligned) + 1  # +1 表头
+    col_count = len(CSV_HEADER_ORDER)
+    print(f"[解析] ListAPI: {len(rows_aligned)} 条数据")
+    return rows_aligned, csv_bytes, row_count, col_count
 
 
 def html_table_to_csv_bytes(html_bytes: bytes) -> tuple[bytes, int, int, list[dict]]:
@@ -538,24 +622,40 @@ def main() -> int:
     if not login(session, username, password):
         return 1
 
-    # 2) 调用导出接口（点"导出按钮"）
+    # 2) 导出数据（优先 ListAPI，失败或异常才回退 Excel 导出）
     filters = build_filters_from_env()
-    try:
-        html_bytes, info = export_lindiao(session, filters=filters)
-    except Exception as exc:
-        print(f"[错误] 调用导出接口失败: {exc}")
-        traceback.print_exc()
-        return 3
+    rows: list[dict] = []
+    csv_bytes: bytes = b""
+    row_count: int = 0
+    col_count: int = 0
+    data_source = ""
+    MIN_ROWS = 20  # 阈值：临调库存不会少于 20 条；低于此值视为可能被 IP 风控过滤 → 回退 Excel
 
-    # 3) 解析 HTML 表格为 CSV + rows
+    print("\n========== 导出阶段（先 ListAPI，失败回退 Excel） ==========")
     try:
-        csv_bytes, row_count, col_count, rows = html_table_to_csv_bytes(html_bytes)
-    except Exception as exc:
-        print(f"[错误] HTML 表格解析失败: {exc}")
-        traceback.print_exc()
-        return 3
+        rows, csv_bytes, row_count, col_count = export_lindiao_listapi(
+            session, filters=filters)
+        data_count = len(rows)
+        print(f"[ListAPI] 返回 {data_count} 条")
+        if data_count < MIN_ROWS:
+            print(f"[ListAPI] 数据异常少 (<{MIN_ROWS})，判断可能被 IP 过滤，自动回退 Excel 导出接口")
+            raise RuntimeError(f"ListAPI only returned {data_count} rows (< {MIN_ROWS})")
+        data_source = "ListAPI"
+    except Exception as exc_list:
+        print(f"[ListAPI] 失败: {exc_list}")
+        print("         → 回退 Excel 导出接口 (kucunld)")
+        try:
+            html_bytes, info = export_lindiao(session, filters=filters)
+            csv_bytes, row_count, col_count, rows = html_table_to_csv_bytes(html_bytes)
+            data_source = "ExcelExport"
+        except Exception as exc_excel:
+            print(f"[错误] ListAPI 和 Excel 导出都失败")
+            print(f"  ListAPI error: {exc_list}")
+            print(f"  Excel err:   {exc_excel}")
+            traceback.print_exc()
+            return 3
 
-    print(f"[解析] CSV 生成: {row_count} 行 (含表头), {col_count} 列, "
+    print(f"[解析] 数据源: {data_source}; CSV: {row_count} 行 (含表头), {col_count} 列, "
           f"{len(csv_bytes)/1024:.1f} KB")
 
     now = datetime.datetime.now()
@@ -569,7 +669,7 @@ def main() -> int:
 
     summary_lines = [
         f"导出时间: {now.strftime('%Y-%m-%d %H:%M:%S')}",
-        f"数据来源: {LINDIAO_PAGE}{filter_desc}",
+        f"数据来源: {LINDIAO_PAGE}{filter_desc}（接口: {data_source}）",
         f"数据量: {row_count - 1} 条 (表头 {col_count} 列)",
         f"文件名: {filename}",
         f"文件大小: {len(csv_bytes)/1024:.1f} KB",

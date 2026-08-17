@@ -1,0 +1,103 @@
+name: 懂火每周全量备份 10 类业务数据 → 飞书云盘
+
+# 触发方式：
+# - 手动：Actions 页面点击 "Run workflow" 立即执行
+# - 定时：外部 cron-job.org 每周一次 HTTP 触发 workflow_dispatch
+#   （项目约定：不用 native on: schedule，避免 GitHub 静默延迟）
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "预览模式（仅生成 CSV 不上传云盘，调试用）"
+        required: false
+        type: boolean
+        default: false
+      reason:
+        description: "手动触发说明（可选）"
+        required: false
+        default: "手动立即触发每周全量备份"
+
+# 并发控制：同一时刻只跑一个实例（10 类业务串行，避免并发互相挤掉）
+concurrency:
+  group: backup-all
+  cancel-in-progress: false
+
+jobs:
+  backup-all:
+    name: 登录 → 循环 10 类业务 → CSV → 上传飞书云盘 → 汇总通知
+    runs-on: ubuntu-latest
+    # 10 类业务串行拉取（开票明细单表 4 万+ 行），留足时间
+    timeout-minutes: 60
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 安装 Python 依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 运行 backup_all.py
+        env:
+          # ===== 懂火系统账号（仓库 Secrets） =====
+          DH_USERNAME: ${{ secrets.DH_USERNAME }}
+          DH_PASSWORD: ${{ secrets.DH_PASSWORD }}
+
+          # ===== 飞书自建应用（仓库 Secrets） =====
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+
+          # ===== 飞书机器人通知（可选，上传后发汇总通知） =====
+          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
+          FEISHU_WEBHOOK_SECRET: ${{ secrets.FEISHU_WEBHOOK_SECRET }}
+
+          # ===== 10 个云盘子文件夹 token（每个对应一类业务） =====
+          # 出库记录
+          FEISHU_BACKUP_FOLDER_CHUKU: ${{ secrets.FEISHU_BACKUP_FOLDER_CHUKU }}
+          # 库存（库存管理 > 导出）
+          FEISHU_BACKUP_FOLDER_KUCUN: ${{ secrets.FEISHU_BACKUP_FOLDER_KUCUN }}
+          # 销售订单
+          FEISHU_BACKUP_FOLDER_XSDD: ${{ secrets.FEISHU_BACKUP_FOLDER_XSDD }}
+          # 销售订单明细汇总
+          FEISHU_BACKUP_FOLDER_XSMX: ${{ secrets.FEISHU_BACKUP_FOLDER_XSMX }}
+          # 采购订单
+          FEISHU_BACKUP_FOLDER_CGDD: ${{ secrets.FEISHU_BACKUP_FOLDER_CGDD }}
+          # 采购订单明细汇总
+          FEISHU_BACKUP_FOLDER_CGMX: ${{ secrets.FEISHU_BACKUP_FOLDER_CGMX }}
+          # 收付确认
+          FEISHU_BACKUP_FOLDER_SFQR: ${{ secrets.FEISHU_BACKUP_FOLDER_SFQR }}
+          # 应收结算
+          FEISHU_BACKUP_FOLDER_YSJS: ${{ secrets.FEISHU_BACKUP_FOLDER_YSJS }}
+          # 费用管理
+          FEISHU_BACKUP_FOLDER_FYGL: ${{ secrets.FEISHU_BACKUP_FOLDER_FYGL }}
+          # 开票明细
+          FEISHU_BACKUP_FOLDER_KPMX: ${{ secrets.FEISHU_BACKUP_FOLDER_KPMX }}
+
+          # ===== 可选运行参数 =====
+          # 分页每页条数（默认 200；服务端上限约 300，超过会丢数据）
+          BACKUP_PAGE_SIZE: ${{ vars.BACKUP_PAGE_SIZE || '200' }}
+
+          # 时区（确保文件名时间正确）
+          TZ: "Asia/Shanghai"
+        run: |
+          if [ "${{ fromJSON(inputs.dry_run) }}" = "true" ]; then
+            export BACKUP_DRY_RUN=1
+            echo "DRY-RUN 模式：仅生成 CSV 到本地，不上传云盘"
+          else
+            echo "实际执行模式：生成 CSV + 上传飞书云盘 + 发汇总通知"
+          fi
+          python backup_all.py
+          EXIT_CODE=$?
+          echo "脚本退出码: $EXIT_CODE"
+          exit $EXIT_CODE
+
+      - name: 失败时告警
+        if: failure()
+        run: |
+          echo "::warning:: 懂火每周全量备份失败，请检查 Secrets 配置、10 个云盘子文件夹协作者权限，或目标网站状态"

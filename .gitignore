@@ -36,13 +36,12 @@ dump_*.py
 dump_*.html
 probe_*.py
 sample_apis.py
-backup_all.py
 test_*.py
 _*.py
 
-# ===== 本地备份目录 / 临时 workflow =====
+# ===== 本地备份目录 =====
 backup_local/
-.github/workflows/backup_all.yml
+backup_local_xlsx_smoke/
 
 # ===== 探查结果 JSON / HTML 快照 =====
 *_results.json
