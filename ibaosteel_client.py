@@ -68,6 +68,9 @@ _CHAR_FIX = str.maketrans({
     's': '5', 'S': '5', 'b': '6', 'G': '6', 'B': '8', 'g': '9', 'q': '9',
 })
 
+# HCSID 默认值（来自 hcs.js，IEC 系统需要此参数才能通过登录验证）
+_HCSID = '0452098f62cb40a9ba4e28ce801d79de1a00d4e2883'
+
 
 # ============================================================
 # 主类（对外就这一个）
@@ -99,8 +102,8 @@ class IEC:
     ):
         if not _HAS_OCR:
             raise ImportError("需要 ddddocr：pip install ddddocr")
-        self.username = username
-        self.password = password
+        self.username = username or os.environ.get('IBAO_USERNAME', '')
+        self.password = password or os.environ.get('IBAO_PASSWORD', '')
         self.retries = retries
         self.manual = manual
         self.timeout = timeout
@@ -221,7 +224,7 @@ class IEC:
             r = s.post(
                 _AUTH,
                 data={'username': enc_u, 'password': enc_p,
-                      'imgcode': code, 'hcsId': ''},
+                      'imgcode': code, 'hcsId': _HCSID},
                 timeout=20,
                 headers={'Accept': 'application/json, text/javascript, */*; q=0.01',
                          'Referer': _LOGIN_PAGE},
@@ -289,7 +292,7 @@ class IEC:
                             r = s.post(
                                 _AUTH, timeout=20,
                                 data={'username': enc_u, 'password': enc_p,
-                                      'imgcode': code, 'hcsId': ''},
+                                      'imgcode': code, 'hcsId': _HCSID},
                             )
                             out = (r.json(), s)
                         except Exception:
