@@ -273,16 +273,14 @@ def _list_all_record_ids(
     page_size: int = 500,
     max_pages: int = 200,
 ) -> set[str]:
-    """分页拉取一张表的所有 record_id（用于过滤另一张表中存在的记录）
+    """分页拉取一张表的所有 record_id（使用 list API 正确翻页）
 
-    使用 search API（POST /records/search），避免 list API 在大表上的性能问题。
     返回 {record_id, ...} 集合。
     """
     url = (f"{FEISHU_OPEN_BASE}/bitable/v1/apps/{app_token}"
-           f"/tables/{table_id}/records/search")
+           f"/tables/{table_id}/records")
     rids: set[str] = set()
     page_token = ""
-    seen_tokens: set[str] = set()
     page_count = 0
 
     while True:
@@ -290,17 +288,12 @@ def _list_all_record_ids(
         if page_count > max_pages:
             print(f"[警告] 已达最大翻页 {max_pages}，停止")
             break
-        if page_token and page_token in seen_tokens:
-            break
+        params = {"page_size": page_size}
         if page_token:
-            seen_tokens.add(page_token)
+            params["page_token"] = page_token
 
-        body: dict = {"page_size": page_size}
-        if page_token:
-            body["page_token"] = page_token
-
-        r = requests.post(url, headers={"Authorization": f"Bearer {token}"},
-                          json=body, timeout=30, proxies=_NO_PROXY)
+        r = requests.get(url, headers={"Authorization": f"Bearer {token}"},
+                          params=params, timeout=30, proxies=_NO_PROXY)
         data = r.json()
         if data.get("code") != 0:
             raise RuntimeError(f"拉取记录失败 (页 {page_count}): {data}")
@@ -318,6 +311,58 @@ def _list_all_record_ids(
         time.sleep(0.2)
 
     return rids
+
+
+def list_all_records_with_field(
+    token: str, app_token: str, table_id: str,
+    field_name: str,
+    page_size: int = 500,
+    max_pages: int = 200,
+) -> dict[str, list[str]]:
+    """拉取一张表的所有记录，建立 {field_name 文本值: [record_id, ...]} 映射。
+
+    用于 Lookup 类型字段无法 filter 的场景：一次 list 拿全部，本地建索引。
+    """
+    url = (f"{FEISHU_OPEN_BASE}/bitable/v1/apps/{app_token}"
+           f"/tables/{table_id}/records")
+    result: dict[str, list[str]] = {}
+    page_token = ""
+    page_count = 0
+    total = 0
+
+    while True:
+        page_count += 1
+        if page_count > max_pages:
+            print(f"[警告] 已达最大翻页 {max_pages}，停止")
+            break
+        params = {"page_size": page_size}
+        if page_token:
+            params["page_token"] = page_token
+
+        r = requests.get(url, headers={"Authorization": f"Bearer {token}"},
+                          params=params, timeout=30, proxies=_NO_PROXY)
+        data = r.json()
+        if data.get("code") != 0:
+            raise RuntimeError(f"拉取记录失败 (页 {page_count}): {data}")
+        d = data.get("data") or {}
+        items = d.get("items") or []
+        for it in items:
+            rid = it.get("record_id", "")
+            fields = it.get("fields") or {}
+            val = extract_text_field(fields.get(field_name))
+            if rid and val:
+                result.setdefault(val, []).append(rid)
+            total += 1
+
+        has_more = d.get("has_more", False)
+        page_token = d.get("page_token") or ""
+        if not has_more or not page_token:
+            break
+        time.sleep(0.2)
+
+    print(f"[飞书] 共拉取 {total} 条记录，{page_count} 页，"
+          f"唯一 {field_name} 值 {len(result)} 个")
+    return result
 
 
 # ============================================================
@@ -399,7 +444,10 @@ def update_progress(
     ship_field: str = DEFAULT_FIELD_SHIP,
     dry_run: bool = False,
 ) -> dict:
-    """主流程：xlsx → 汇总 → 查合约表拿 record_id → 批量更新进度表
+    """主流程：xlsx → 汇总 → 直接在进度表按"资源号"查 record_id → 批量更新
+
+    注：进度表的"资源号"是 Text 类型，可直接 filter；
+    不需要走合约表中转（两表 record_id 并非一一对应）。
 
     Returns
     -------
@@ -419,28 +467,18 @@ def update_progress(
     for k, v in sample:
         print(f"    {k} → 准发量 {v[XLSX_COL_QUASI]}, 出厂量 {v[XLSX_COL_SHIP]}")
 
-    # 2. 飞书认证 + 找两张表
-    print(f"\n=== 步骤 2/4：飞书认证 + 找 '{contract_table_name}' 和 '{progress_table_name}' 表 ===")
+    # 2. 飞书认证 + 找进度表
+    print(f"\n=== 步骤 2/4：飞书认证 + 找 '{progress_table_name}' 表 ===")
     app_id = env("FEISHU_APP_ID")
     app_secret = env("FEISHU_APP_SECRET")
     token = feishu_tenant_access_token(app_id, app_secret)
 
-    contract_id = find_table_id(token, app_token, contract_table_name)
     progress_id = find_table_id(token, app_token, progress_table_name)
-    print(f"[飞书] 合约表: {contract_id}（查 record_id）")
-    print(f"[飞书] 进度表: {progress_id}（写 准发量/出厂量）")
+    print(f"[飞书] 进度表: {progress_id}（查 record_id + 写 准发量/出厂量）")
 
-    # 校验合约表的"资源号"字段
-    contract_fields = list_fields(token, app_token, contract_id)
-    cfield_meta = next((f for f in contract_fields if f.get("field_name") == resource_field), None)
-    if not cfield_meta:
-        cnames = [f.get("field_name", "") for f in contract_fields]
-        raise RuntimeError(f"合约表无 '{resource_field}' 字段，现有字段: {cnames}")
-    print(f"[飞书] 合约表 '{resource_field}' 字段类型: {cfield_meta.get('type')} ({cfield_meta.get('ui_type')})")
-
-    # 校验进度表的"准发量""出厂量"字段
+    # 校验进度表的"资源号""准发量""出厂量"字段
     progress_fields = list_fields(token, app_token, progress_id)
-    for fn in (quasi_field, ship_field):
+    for fn in (resource_field, quasi_field, ship_field):
         meta = next((f for f in progress_fields if f.get("field_name") == fn), None)
         if not meta:
             pnames = [f.get("field_name", "") for f in progress_fields]
@@ -449,13 +487,11 @@ def update_progress(
             )
         print(f"[飞书] 进度表 '{fn}' 字段类型: {meta.get('type')} ({meta.get('ui_type')})")
 
-    # 3. 在合约表按"资源号"批量查询 record_id
-    #    （合约表 record_id 与进度表 record_id 一一对应）
-    print(f"\n=== 步骤 3/4：在合约表按 '{resource_field}' 查询 record_id ===")
-    order_list = list(order_data.keys())
-    matched = search_records_by_resource(
-        token, app_token, contract_id,
-        resource_field, order_list,
+    # 3. 拉取进度表全部记录，建立 {资源号: [record_id]} 映射
+    #    （进度表"资源号"是 Lookup 类型，filter 不可靠，改用 list + 本地建索引）
+    print(f"\n=== 步骤 3/4：拉取进度表全部记录，按 '{resource_field}' 建立索引 ===")
+    matched = list_all_records_with_field(
+        token, app_token, progress_id, resource_field,
     )
 
     xlsx_set = set(order_data.keys())
@@ -463,28 +499,20 @@ def update_progress(
     missing = xlsx_set - matched_set
     print(f"[飞书] 匹配结果:")
     print(f"  xlsx 中订单数: {len(xlsx_set)}")
-    print(f"  合约表匹配数:  {len(matched_set)}")
+    print(f"  进度表匹配数:  {len(matched_set)}")
     print(f"  未匹配数:       {len(missing)}")
     if missing:
         print(f"  未匹配订单号示例: {list(missing)[:10]}")
 
-    # 4. 拉进度表所有 record_id，过滤掉合约表有但进度表没有的
-    #    （两表 record_id 不是一一对应，只有部分重叠）
-    print(f"\n=== 步骤 4/5：拉进度表 record_id，过滤不存在的 ===")
-    progress_rids = _list_all_record_ids(token, app_token, progress_id)
-    print(f"[飞书] 进度表共 {len(progress_rids)} 条记录")
-
+    # 4. 组装批量更新记录（同一资源号有多条记录时全部更新）
+    print(f"\n=== 步骤 4/4：在进度表批量更新 '{quasi_field}' 和 '{ship_field}' ===")
     update_records: list[dict] = []
-    skipped_no_progress = 0
     multi_count = 0
     for order_no, vals in order_data.items():
         rids = matched.get(order_no)
         if not rids:
             continue
-        found_any = False
         for rid in rids:
-            if rid not in progress_rids:
-                continue
             update_records.append({
                 "record_id": rid,
                 "fields": {
@@ -492,21 +520,12 @@ def update_progress(
                     ship_field: vals[XLSX_COL_SHIP],
                 },
             })
-            found_any = True
-        if not found_any:
-            skipped_no_progress += 1
-        if rids and len(rids) > 1:
+        if len(rids) > 1:
             multi_count += 1
 
-    if skipped_no_progress:
-        print(f"  [提示] {skipped_no_progress} 个订单在合约表有但进度表无对应记录，跳过")
     if multi_count:
-        print(f"  [提示] 有 {multi_count} 个资源号在合约表中有多条匹配记录")
-
+        print(f"  [提示] 有 {multi_count} 个资源号在进度表中有多条匹配记录，将全部更新")
     print(f"  实际待更新记录数: {len(update_records)}")
-
-    # 5. 批量更新
-    print(f"\n=== 步骤 5/5：在进度表批量更新 '{quasi_field}' 和 '{ship_field}' ===")
 
     if dry_run:
         print("\n[DRY-RUN] 仅预览，不实际写入。前 10 条:")
