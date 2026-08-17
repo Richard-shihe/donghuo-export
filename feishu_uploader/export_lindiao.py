@@ -130,6 +130,10 @@ def login(session: requests.Session, username: str, password: str,
             result = json.loads(text)
             if isinstance(result, dict) and str(result.get("code")) == "200":
                 print("[登录] 成功")
+                # === DEBUG: 登录后的 cookies ===
+                print(f"[DEBUG] 登录响应后 session cookies: {list(session.cookies.keys())}")
+                for ck in session.cookies:
+                    print(f"  - {ck.name} (len={len(ck.value) if ck.value else 0}, domain={ck.domain})")
                 return True
             msg = result.get("msg") or result.get("message") or text[:100]
             print(f"  失败: {msg}")
@@ -155,15 +159,43 @@ def export_lindiao(session: requests.Session,
     filters: 可选筛选 dict（对应 form1 表单字段），如:
         {"sxzhuantai": "已锁", "huoquan": "拥有", "canku": "仲鼎库"}
     """
+    # === DEBUG: 登录态检查 ===
+    print(f"[DEBUG] session cookies: {list(session.cookies.keys())}")
+    for ck in session.cookies:
+        # 只打印 cookie name 和长度，不打印 value（安全）
+        print(f"  - {ck.name} (len={len(ck.value) if ck.value else 0}, domain={ck.domain})")
+
     # 先访问外层框架页与内层页面，建立 Referer / 会话状态
     try:
-        session.get(LINDIAO_FRAME_PAGE, timeout=15)
-        session.get(LINDIAO_PAGE, timeout=15)
+        print(f"[DEBUG] GET 框架页 {LINDIAO_FRAME_PAGE}")
+        r_frame = session.get(LINDIAO_FRAME_PAGE, timeout=15)
+        print(f"  HTTP {r_frame.status_code}, final_url={r_frame.url}, size={len(r_frame.content)} bytes")
+        # 检查是否被重定向到登录页
+        if "login" in r_frame.url.lower() or "登录" in r_frame.text[:500]:
+            print(f"  [警告] 框架页被重定向到登录页！response 前 300 字符:")
+            print(f"  {r_frame.text[:300]}")
+
+        print(f"[DEBUG] GET 子页 {LINDIAO_PAGE}")
+        r_page = session.get(LINDIAO_PAGE, timeout=15)
+        print(f"  HTTP {r_page.status_code}, final_url={r_page.url}, size={len(r_page.content)} bytes")
+        if "login" in r_page.url.lower() or "登录" in r_page.text[:500]:
+            print(f"  [警告] 子页被重定向到登录页！response 前 300 字符:")
+            print(f"  {r_page.text[:300]}")
+        else:
+            # 打印子页前 200 字符看是不是有数据/正常加载
+            print(f"  子页前 200 字符: {r_page.text[:200]}")
     except Exception as exc:
         print(f"  [警告] 访问页面预热线: {exc}")
 
+    # === DEBUG: 导出请求 ===
     data = filters or {}
     print(f"[导出] POST {EXPORT_API} (筛选: {data or '无'})")
+    # 打印请求头
+    print(f"[DEBUG] 请求 headers:")
+    for k, v in session.headers.items():
+        if k.lower() in ("user-agent", "accept-language", "referer", "cookie"):
+            print(f"  {k}: {v[:80] if isinstance(v, str) else v}")
+
     r = session.post(EXPORT_API, data=data, timeout=timeout, allow_redirects=True)
     if r.status_code != 200:
         raise RuntimeError(f"导出接口返回 HTTP {r.status_code}")
@@ -176,6 +208,15 @@ def export_lindiao(session: requests.Session,
     }
     print(f"  HTTP {r.status_code}, Content-Type={info['content_type']}, "
           f"size={info['size_kb']} KB")
+    # === DEBUG: 打印响应前 500 字符 ===
+    try:
+        resp_preview = r.content.decode("utf-8", errors="replace")[:500]
+        print(f"[DEBUG] 响应前 500 字符:\n{resp_preview}")
+        # 统计 <tr> 数量
+        tr_count = len(re.findall(r'<tr', resp_preview, flags=re.I))
+        print(f"[DEBUG] 前 500 字符中 <tr> 数量: {tr_count}")
+    except Exception as e:
+        print(f"[DEBUG] 解码响应失败: {e}")
     return r.content, info
 
 
