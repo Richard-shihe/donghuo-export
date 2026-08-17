@@ -266,6 +266,61 @@ def search_records_by_resource(
 
 
 # ============================================================
+# 飞书多维表格：拉取表所有 record_id
+# ============================================================
+def _list_all_record_ids(
+    token: str, app_token: str, table_id: str,
+    page_size: int = 500,
+    max_pages: int = 200,
+) -> set[str]:
+    """分页拉取一张表的所有 record_id（用于过滤另一张表中存在的记录）
+
+    使用 search API（POST /records/search），避免 list API 在大表上的性能问题。
+    返回 {record_id, ...} 集合。
+    """
+    url = (f"{FEISHU_OPEN_BASE}/bitable/v1/apps/{app_token}"
+           f"/tables/{table_id}/records/search")
+    rids: set[str] = set()
+    page_token = ""
+    seen_tokens: set[str] = set()
+    page_count = 0
+
+    while True:
+        page_count += 1
+        if page_count > max_pages:
+            print(f"[警告] 已达最大翻页 {max_pages}，停止")
+            break
+        if page_token and page_token in seen_tokens:
+            break
+        if page_token:
+            seen_tokens.add(page_token)
+
+        body: dict = {"page_size": page_size}
+        if page_token:
+            body["page_token"] = page_token
+
+        r = requests.post(url, headers={"Authorization": f"Bearer {token}"},
+                          json=body, timeout=30, proxies=_NO_PROXY)
+        data = r.json()
+        if data.get("code") != 0:
+            raise RuntimeError(f"拉取记录失败 (页 {page_count}): {data}")
+        d = data.get("data") or {}
+        items = d.get("items") or []
+        for it in items:
+            rid = it.get("record_id", "")
+            if rid:
+                rids.add(rid)
+
+        has_more = d.get("has_more", False)
+        page_token = d.get("page_token") or ""
+        if not has_more or not page_token:
+            break
+        time.sleep(0.2)
+
+    return rids
+
+
+# ============================================================
 # 飞书多维表格：批量更新
 # ============================================================
 def batch_update_records(
