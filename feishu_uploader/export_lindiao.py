@@ -35,6 +35,14 @@
   FILTER_PINMIN         品名筛选
   FEISHU_WEBHOOK_URL    飞书机器人 Webhook
   FEISHU_WEBHOOK_SECRET 机器人签名密钥
+  BITABLE_NO_DELETE     设为 true 跳过"删除最早批次"逻辑（默认 false）
+
+扩展功能（写入多维表格后自动执行）：
+  1. 给每条记录注入"创建时间"字段（毫秒时间戳），作为批次标识
+  2. 删除目标表"创建时间"最早的整批记录（三道保护：BITABLE_NO_DELETE / 本次写入 0 条 / 最早日期==今天）
+  3. 更新 AI 反馈表 tblUzkPskttsBa0W 中固定记录 recv2rwZdad6FJ 的"AI 反馈"字段
+     （写入秒级时间 + 状况：写入N条 | 删除:日期(N条)）
+  4. 飞书机器人发送表格化通知（源文件/数据来源/写入条数/丢值/失败批次/删除批次/AI 反馈/执行时间）
 """
 
 import os
@@ -427,10 +435,21 @@ BITABLE_FIELD_TYPES: dict[str, str] = {
     "车船号": "text", "提单号": "text", "备注": "text",
     "件(张)数": "number", "重量": "number", "销售单价": "number",
     "入库日期": "datetime",
+    "创建时间": "datetime",
 }
 
 # batch_create 单次最多 500 条
 BITABLE_BATCH_SIZE = 500
+# batch_delete 单次最多 100 条
+BITABLE_DELETE_BATCH = 100
+
+# AI 反馈表（硬编码，用户指定）
+AI_FEEDBACK_TABLE_ID = "tblUzkPskttsBa0W"
+AI_FEEDBACK_RECORD_ID = "recv2rwZdad6FJ"
+AI_FEEDBACK_FIELD_NAME = "AI 反馈"
+
+# 时区：Asia/Shanghai (UTC+8)，硬编码避免依赖系统时区
+SHANGHAI_OFFSET_HOURS = 8
 
 
 def _to_bitable_text(val) -> str:
@@ -473,6 +492,24 @@ def _convert_field(val, ftype: str):
     return None
 
 
+def epoch_ms_to_shanghai_date(ms: int) -> str:
+    """毫秒时间戳 → 'YYYY-MM-DD'（按 Asia/Shanghai 时区）"""
+    dt_utc = datetime.datetime.utcfromtimestamp(ms / 1000)
+    dt_sh = dt_utc + datetime.timedelta(hours=SHANGHAI_OFFSET_HOURS)
+    return dt_sh.strftime("%Y-%m-%d")
+
+
+def shanghai_date_to_day_range_ms(date_str: str) -> tuple[int, int]:
+    """'YYYY-MM-DD'（Shanghai 本地）→ [start_ms, end_ms]（UTC ms，含当天 23:59:59.999）"""
+    naive_start = datetime.datetime.strptime(date_str, "%Y-%m-%d")
+    utc_start = naive_start - datetime.timedelta(hours=SHANGHAI_OFFSET_HOURS)
+    # 显式设 UTC tzinfo，避免 .timestamp() 用系统本地时区解读（本地 Shanghai / CI UTC 不一致）
+    utc_aware = utc_start.replace(tzinfo=datetime.timezone.utc)
+    start_ms = int(utc_aware.timestamp() * 1000)
+    end_ms = start_ms + 86400 * 1000 - 1
+    return start_ms, end_ms
+
+
 def bitable_batch_create(token: str, app_token: str, table_id: str,
                           records: list[dict]) -> list[dict]:
     """调 batch_create API，单次最多 500 条，自动分批"""
@@ -511,11 +548,13 @@ def bitable_batch_create(token: str, app_token: str, table_id: str,
 
 
 def bitable_append_records(token: str, app_token: str, table_id: str,
-                            rows: list[dict]) -> dict:
+                            rows: list[dict],
+                            batch_ts_ms: int | None = None) -> dict:
     """
     将临调库存 rows（解析出的 dict 列表）追加到多维表格。
     字段映射见 BITABLE_FIELD_TYPES；不在此映射的字段自动跳过。
     不去重，直接 append。
+    batch_ts_ms: 若提供，给每条记录的"创建时间"字段填上此毫秒时间戳（作为批次标识）。
     """
     if not rows:
         print("[bitable] 无数据可写入")
@@ -531,6 +570,9 @@ def bitable_append_records(token: str, app_token: str, table_id: str,
             if v is None or (isinstance(v, str) and not v):
                 continue
             fields[col_name] = v
+        # 注入批次时间戳（覆盖 row 里可能为空的"创建时间"字段）
+        if batch_ts_ms is not None:
+            fields["创建时间"] = batch_ts_ms
         # 记录哪些 CSV 字段未在映射中（仅第一次出现时打印）
         for col_name in row.keys():
             if col_name not in BITABLE_FIELD_TYPES:
@@ -544,6 +586,304 @@ def bitable_append_records(token: str, app_token: str, table_id: str,
     created = bitable_batch_create(token, app_token, table_id, records_payload)
     print(f"[bitable] 成功写入 {len(created)} 条记录")
     return {"created": len(created), "records": created}
+
+
+# ---------------- 删除最早批次 + AI 反馈 + 表格通知 ----------------
+
+def _bitable_collect_record_ids_by_date(token: str, app_token: str,
+                                         table_id: str, field_name: str,
+                                         date_str: str) -> tuple[list[str], str]:
+    """
+    收集指定 field_name（datetime 类型）对应 date_str（YYYY-MM-DD，Shanghai）
+    的所有 record_id。
+
+    优先用 search API + filter(isWithin, ms 范围)，失败 fallback 到 list API 全量翻页
+    + Python 端按日期过滤。
+
+    返回 (record_ids, source)，source ∈ {"search", "list_fallback"}。
+    """
+    headers = {"Authorization": f"Bearer {token}"}
+    start_ms, end_ms = shanghai_date_to_day_range_ms(date_str)
+    record_ids: list[str] = []
+
+    # 方法 1: search API + isWithin filter
+    try:
+        search_url = (f"{FEISHU_OPEN_BASE}/bitable/v1/apps/{app_token}"
+                      f"/tables/{table_id}/records/search")
+        page_token: str | None = None
+        page = 1
+        while True:
+            body: dict = {
+                "filter": {
+                    "conjunction": "and",
+                    "conditions": [{
+                        "field_name": field_name,
+                        "operator": "isWithin",
+                        "value": [start_ms, end_ms],
+                    }],
+                },
+                "page_size": 500,
+            }
+            if page_token:
+                body["page_token"] = page_token
+            r = requests.post(search_url, headers=headers, json=body, timeout=30)
+            data = r.json()
+            if data.get("code") != 0:
+                raise RuntimeError(
+                    f"search API code={data.get('code')}, msg={data.get('msg')}"
+                )
+            items = (data.get("data") or {}).get("items") or []
+            for item in items:
+                rid = item.get("record_id")
+                if rid:
+                    record_ids.append(rid)
+            page_token = (data.get("data") or {}).get("page_token") or ""
+            has_more = (data.get("data") or {}).get("has_more")
+            print(f"  [search] page {page}: +{len(items)}, "
+                  f"累计 {len(record_ids)}, has_more={has_more}")
+            if not has_more or not page_token:
+                break
+            page += 1
+        return record_ids, "search"
+    except Exception as exc:
+        print(f"  [search] 失败: {exc}; 回退 list API 全量翻页")
+
+    # 方法 2: list API 全量翻页 + Python 端按 ms 范围过滤
+    list_url = (f"{FEISHU_OPEN_BASE}/bitable/v1/apps/{app_token}"
+                f"/tables/{table_id}/records")
+    page_token = None
+    page = 1
+    while True:
+        params: dict = {"page_size": 500}
+        if page_token:
+            params["page_token"] = page_token
+        r = requests.get(list_url, headers=headers, params=params, timeout=30)
+        data = r.json()
+        if data.get("code") != 0:
+            print(f"  [list] API 错误: code={data.get('code')}, msg={data.get('msg')}")
+            break
+        items = (data.get("data") or {}).get("items") or []
+        for item in items:
+            ts = (item.get("fields") or {}).get(field_name)
+            if isinstance(ts, (int, float)) and start_ms <= int(ts) <= end_ms:
+                rid = item.get("record_id")
+                if rid:
+                    record_ids.append(rid)
+        page_token = (data.get("data") or {}).get("page_token") or ""
+        has_more = (data.get("data") or {}).get("has_more")
+        print(f"  [list] page {page}: +{len(items)}, "
+              f"累计匹配 {len(record_ids)}, has_more={has_more}")
+        if not has_more or not page_token:
+            break
+        page += 1
+        time.sleep(0.1)
+    return record_ids, "list_fallback"
+
+
+def bitable_delete_oldest_batch(token: str, app_token: str, table_id: str,
+                                  today_date: str,
+                                  just_wrote_count: int) -> dict:
+    """
+    删除目标表中"创建时间"字段最早的整批记录。
+
+    三道保护（任一命中即跳过删除）：
+      1. 环境变量 BITABLE_NO_DELETE=true → 跳过
+      2. just_wrote_count <= 0 → 跳过（没导进新数据别白删旧数据）
+      3. 最早批次日期 == today_date → 跳过（防止自删本次导入）
+
+    返回 dict:
+      {
+        "skipped": bool,
+        "skip_reason": str,           # skipped=True 时填
+        "deleted_count": int,
+        "batch_date": str,            # 最早批次日期 YYYY-MM-DD（即使 skipped 也回填）
+        "total_in_batch": int,       # 批次总条数
+        "source": str,               # "search" / "list_fallback" / ""
+      }
+    """
+    result = {
+        "skipped": True, "skip_reason": "",
+        "deleted_count": 0, "batch_date": "",
+        "total_in_batch": 0, "source": "",
+    }
+
+    # 保护 1: 环境变量
+    if env("BITABLE_NO_DELETE", "false").lower() == "true":
+        result["skip_reason"] = "BITABLE_NO_DELETE=true"
+        print(f"[delete] 跳过: {result['skip_reason']}")
+        return result
+
+    # 保护 2: 本次写入 0 条
+    if just_wrote_count <= 0:
+        result["skip_reason"] = f"本次写入 {just_wrote_count} 条"
+        print(f"[delete] 跳过: {result['skip_reason']}")
+        return result
+
+    headers = {"Authorization": f"Bearer {token}"}
+
+    # 步骤 1: 查最早记录的"创建时间"
+    print(f"[delete] 步骤1: 查询最早批次日期 (按'创建时间'升序)")
+    search_url = (f"{FEISHU_OPEN_BASE}/bitable/v1/apps/{app_token}"
+                  f"/tables/{table_id}/records/search")
+    try:
+        sort_body = {
+            "sort": [{"field_name": "创建时间", "desc": False}],
+            "page_size": 1,
+        }
+        r = requests.post(search_url, headers=headers, json=sort_body, timeout=30)
+        data = r.json()
+        if data.get("code") != 0:
+            result["skip_reason"] = (f"查询最早记录失败: code={data.get('code')}, "
+                                      f"msg={data.get('msg')}")
+            print(f"[delete] {result['skip_reason']}")
+            return result
+        items = (data.get("data") or {}).get("items") or []
+        if not items:
+            result["skip_reason"] = "表中无记录"
+            print(f"[delete] {result['skip_reason']}")
+            return result
+        oldest_ts = (items[0].get("fields") or {}).get("创建时间")
+        if not isinstance(oldest_ts, (int, float)):
+            result["skip_reason"] = f"最早记录'创建时间'字段为空或非数字: {oldest_ts!r}"
+            print(f"[delete] {result['skip_reason']}")
+            return result
+        oldest_date = epoch_ms_to_shanghai_date(int(oldest_ts))
+        result["batch_date"] = oldest_date
+        print(f"[delete] 最早批次日期: {oldest_date}")
+    except Exception as exc:
+        result["skip_reason"] = f"查询最早记录异常: {exc}"
+        print(f"[delete] {result['skip_reason']}")
+        return result
+
+    # 保护 3: 最早日期 == 今天
+    if oldest_date == today_date:
+        result["skip_reason"] = (f"最早批次日期 {oldest_date} == 今天 {today_date}, "
+                                  f"防止自删本次导入")
+        print(f"[delete] 跳过: {result['skip_reason']}")
+        return result
+
+    # 步骤 2: 收集该日期全部 record_id
+    print(f"[delete] 步骤2: 收集 {oldest_date} 的全部 record_id")
+    record_ids, source = _bitable_collect_record_ids_by_date(
+        token, app_token, table_id, "创建时间", oldest_date)
+    result["source"] = source
+    result["total_in_batch"] = len(record_ids)
+    print(f"[delete] 共 {len(record_ids)} 条待删 (source={source})")
+
+    if not record_ids:
+        result["skip_reason"] = f"日期 {oldest_date} 未找到任何记录"
+        print(f"[delete] {result['skip_reason']}")
+        return result
+
+    # 步骤 3: 分批硬删（每批 ≤ BITABLE_DELETE_BATCH=100）
+    print(f"[delete] 步骤3: 分批硬删 (每批 ≤{BITABLE_DELETE_BATCH} 条)")
+    delete_url = (f"{FEISHU_OPEN_BASE}/bitable/v1/apps/{app_token}"
+                  f"/tables/{table_id}/records/batch_delete")
+    deleted_count = 0
+    batch_num = 0
+    for start in range(0, len(record_ids), BITABLE_DELETE_BATCH):
+        batch = record_ids[start:start + BITABLE_DELETE_BATCH]
+        batch_num += 1
+        try:
+            r = requests.post(delete_url, headers=headers,
+                              json={"records": batch}, timeout=60)
+            data = r.json()
+            if data.get("code") != 0:
+                print(f"  批次 {batch_num} 删除失败: code={data.get('code')}, "
+                      f"msg={data.get('msg')}")
+                continue
+            deleted_count += len(batch)
+            print(f"  批次 {batch_num}: 删除 {len(batch)} 条, "
+                  f"累计 {deleted_count}/{len(record_ids)}")
+        except Exception as exc:
+            print(f"  批次 {batch_num} 异常: {exc}")
+            continue
+        time.sleep(0.1)
+
+    result["skipped"] = False
+    result["deleted_count"] = deleted_count
+    print(f"[delete] 完成: 删除 {deleted_count}/{len(record_ids)} 条, 日期={oldest_date}")
+    return result
+
+
+def bitable_update_ai_feedback(token: str, app_token: str,
+                                content: str) -> bool:
+    """
+    更新 AI 反馈表 tblUzkPskttsBa0W 中固定记录 recv2rwZdad6FJ 的"AI 反馈"字段。
+    失败不抛异常，返回 False。
+    """
+    url = (f"{FEISHU_OPEN_BASE}/bitable/v1/apps/{app_token}"
+           f"/tables/{AI_FEEDBACK_TABLE_ID}/records/{AI_FEEDBACK_RECORD_ID}")
+    headers = {"Authorization": f"Bearer {token}"}
+    payload = {"fields": {AI_FEEDBACK_FIELD_NAME: content}}
+    try:
+        r = requests.put(url, headers=headers, json=payload, timeout=30)
+        data = r.json()
+        if data.get("code") != 0:
+            print(f"[AI 反馈] 更新失败: code={data.get('code')}, "
+                  f"msg={data.get('msg')}")
+            return False
+        print(f"[AI 反馈] 已更新 record_id={AI_FEEDBACK_RECORD_ID} "
+              f"的 '{AI_FEEDBACK_FIELD_NAME}' 字段")
+        return True
+    except Exception as exc:
+        print(f"[AI 反馈] 更新异常: {exc}")
+        return False
+
+
+def build_notify_table(filename: str, row_count: int, bitable_created: int,
+                        delete_result: dict, ai_feedback_ok: bool | None,
+                        exec_time_str: str, filter_desc: str) -> str:
+    """
+    生成纯文本 markdown 表格通知。
+
+    返回示例：
+      | 项        | 内容                          |
+      | -------- | --------------------------- |
+      | 源文件     | lindiao_20260817_213015.csv |
+      | 数据来源   | 临调库存（129 行）                 |
+      | 写入条数   | 129 条                       |
+      | 丢值       | 0 条                          |
+      | 失败批次   | 0                            |
+      | 删除批次   | 2026-05-16 (130 条)          |
+      | AI 反馈    | 已更新                          |
+      | 执行时间   | 2026-08-17 21:30:15          |
+    """
+    items: list[tuple[str, str]] = [
+        ("源文件", filename),
+        ("数据来源", f"临调库存（{row_count - 1} 行{filter_desc}）"),
+        ("写入条数", f"{bitable_created} 条"),
+        ("丢值", "0 条"),
+        ("失败批次", "0"),
+    ]
+
+    # 删除批次行
+    if delete_result.get("skipped"):
+        reason = delete_result.get("skip_reason") or "未执行"
+        items.append(("删除批次", f"跳过（{reason}）"))
+    elif delete_result.get("batch_date"):
+        items.append(("删除批次",
+                       f"{delete_result['batch_date']} "
+                       f"({delete_result.get('deleted_count', 0)} 条)"))
+    else:
+        items.append(("删除批次", "未执行"))
+
+    # AI 反馈行
+    if ai_feedback_ok is True:
+        items.append(("AI 反馈", "已更新"))
+    elif ai_feedback_ok is False:
+        items.append(("AI 反馈", "更新失败"))
+    else:
+        items.append(("AI 反馈", "未执行"))
+
+    items.append(("执行时间", exec_time_str))
+
+    lines = ["| 项 | 内容 |", "| --- | --- |"]
+    for k, v in items:
+        # 转义 markdown 表格中的 |
+        v_safe = str(v).replace("|", "\\|")
+        lines.append(f"| {k} | {v_safe} |")
+    return "\n".join(lines)
 
 
 # ---------------- 飞书机器人通知（可选） ----------------
@@ -661,6 +1001,21 @@ def main() -> int:
     now = datetime.datetime.now()
     filename = f"lindiao_{now.strftime('%Y%m%d_%H%M%S')}.csv"
 
+    # 批次时间戳：写入多维表格"创建时间"字段，作为批次标识
+    # batch_ts_sec 秒级（用于 AI 反馈文本显示）；batch_ts_ms 毫秒级（飞书 datetime 字段）
+    batch_ts_sec = int(time.time())
+    batch_ts_ms = batch_ts_sec * 1000
+    today_date = epoch_ms_to_shanghai_date(batch_ts_ms)
+    exec_time_str = now.strftime("%Y-%m-%d %H:%M:%S")
+
+    # 删除/AI 反馈结果（默认值，无 bitable 动作时保持）
+    delete_result: dict = {
+        "skipped": True, "skip_reason": "no_bitable_action",
+        "deleted_count": 0, "batch_date": "",
+        "total_in_batch": 0, "source": "",
+    }
+    ai_feedback_ok: bool | None = None
+
     filter_desc = ""
     if filters:
         filter_desc = " | 筛选: " + ", ".join(f"{k}={v}" for k, v in filters.items())
@@ -736,7 +1091,8 @@ def main() -> int:
                 continue
             try:
                 result = bitable_append_records(
-                    fs_token, bitable_app_token, bitable_table_id, rows)
+                    fs_token, bitable_app_token, bitable_table_id, rows,
+                    batch_ts_ms=batch_ts_ms)
                 bitable_created = result.get("created", 0)
                 print(f"[bitable] 写入 {bitable_created} 条")
             except Exception as exc:
@@ -745,20 +1101,54 @@ def main() -> int:
                 rc = 4
                 continue
 
-    # 汇总通知
+            # 成功写入后：① 删除最早批次  ② 更新 AI 反馈表
+            try:
+                print("\n========== 删除最早批次 ==========")
+                delete_result = bitable_delete_oldest_batch(
+                    fs_token, bitable_app_token, bitable_table_id,
+                    today_date=today_date,
+                    just_wrote_count=bitable_created)
+            except Exception as exc:
+                print(f"[警告] 删除最早批次异常: {exc}")
+                traceback.print_exc()
+
+            # AI 反馈文本（秒级时间 + 状况）
+            if delete_result.get("skipped"):
+                delete_desc = f"跳过({delete_result.get('skip_reason', '')})"
+            else:
+                delete_desc = (f"{delete_result.get('batch_date', '')} "
+                                f"({delete_result.get('deleted_count', 0)} 条)")
+            ai_feedback_text = (
+                f"{exec_time_str} | 写入 {bitable_created} 条 | "
+                f"删除: {delete_desc}"
+            )
+            try:
+                print("\n========== 更新 AI 反馈 ==========")
+                ai_feedback_ok = bitable_update_ai_feedback(
+                    fs_token, bitable_app_token, ai_feedback_text)
+            except Exception as exc:
+                print(f"[警告] AI 反馈更新异常: {exc}")
+                traceback.print_exc()
+
+    # 汇总通知（表格化）
     if rc == 0:
         ok_parts = []
         if "feishu" in actions:
             ok_parts.append("已上传云盘")
         if "bitable" in actions:
             ok_parts.append(f"已写入多维表格 {bitable_created} 条")
-        notify_lines = [f"✅ 临调库存导出完成（{' + '.join(ok_parts)}）"] + summary_lines
-        if "feishu" in actions and file_token:
-            notify_lines.append(f"file_token: {file_token}")
-        if "bitable" in actions:
-            notify_lines.append(f"app_token: {bitable_app_token}")
-            notify_lines.append(f"table_id: {bitable_table_id}")
-        notify_text = "\n".join(notify_lines)
+        header = f"✅ 临调库存导出完成（{' + '.join(ok_parts)}）"
+
+        notify_text = header + "\n\n" + build_notify_table(
+            filename=filename,
+            row_count=row_count,
+            bitable_created=bitable_created,
+            delete_result=delete_result,
+            ai_feedback_ok=ai_feedback_ok,
+            exec_time_str=exec_time_str,
+            filter_desc=filter_desc,
+        )
+
         if fs_webhook_url:
             try:
                 feishu_send_bot_text(fs_webhook_url, fs_webhook_secret, notify_text)
