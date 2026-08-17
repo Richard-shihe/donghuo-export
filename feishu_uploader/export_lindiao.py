@@ -899,24 +899,34 @@ def _feishu_sign(secret: str, timestamp: str) -> str:
     return _b64.b64encode(h.digest()).decode("utf-8")
 
 
-def feishu_send_im_text(token: str, chat_id: str, text: str) -> None:
+def feishu_send_im_text(token: str, receive_id: str, text: str,
+                        *, receive_id_type: str = "chat_id") -> None:
     """
-    用自建应用 tenant_access_token 通过 IM API 向指定 chat_id 群发文本消息。
-    需要：应用已开启"机器人"能力 + 已被加入目标群 + im:message:send_as_bot 权限。
+    用自建应用 tenant_access_token 通过 IM API 发文本消息。
+
+    receive_id_type 可选:
+      - "chat_id"  : 发群聊（receive_id = oc_xxx）。
+                     需要应用已开启"机器人"能力 + 已被加入目标群 + im:message:send_as_bot 权限。
+      - "union_id" : 发私聊给个人（receive_id = on_xxx）。
+                     需要应用在用户所在部门"可用"（已发布）+ im:message:send_as_bot 权限。
+      - "open_id"  : 发私聊给个人（receive_id = ou_xxx，跟应用绑定的 open_id）。
+      - "user_id"  : 发私聊给个人（receive_id = feishu user_id）。
+      - "email"    : 发私聊给个人（receive_id = 飞书邮箱）。
     """
-    url = f"{FEISHU_OPEN_BASE}/im/v1/messages?receive_id_type=chat_id"
+    url = f"{FEISHU_OPEN_BASE}/im/v1/messages?receive_id_type={receive_id_type}"
     headers = {"Authorization": f"Bearer {token}"}
     payload = {
-        "receive_id": chat_id,
+        "receive_id": receive_id,
         "msg_type": "text",
         "content": json.dumps({"text": text}, ensure_ascii=False),
     }
     r = requests.post(url, headers=headers, json=payload, timeout=15)
     data = r.json()
     if data.get("code") != 0:
-        raise RuntimeError(f"IM API 发消息失败: code={data.get('code')}, "
+        raise RuntimeError(f"IM API 发消息失败 (type={receive_id_type}, "
+                           f"id={receive_id}): code={data.get('code')}, "
                            f"msg={data.get('msg')}, raw={data}")
-    print(f"[飞书通知] IM API 发送成功 (chat_id={chat_id})")
+    print(f"[飞书通知] IM API 发送成功 (type={receive_id_type}, id={receive_id[:6]}...)")
 
 
 def feishu_send_bot_text(webhook_url: str, secret: str, text: str) -> None:
@@ -964,8 +974,13 @@ def main() -> int:
     fs_app_id = env("FEISHU_APP_ID")
     fs_app_secret = env("FEISHU_APP_SECRET")
     fs_folder_token = env("FEISHU_FOLDER_TOKEN")
-    fs_chat_id = env("FEISHU_CHAT_ID")              # IM API 通知：应用已加入的群 chat_id
-    fs_webhook_url = env("FEISHU_WEBHOOK_URL")      # 备选：自定义机器人 Webhook
+    # 私聊通知：多个 Union ID 用英文逗号分隔（推荐，无需建群）
+    fs_union_ids_raw = env("FEISHU_UNION_IDS")
+    fs_union_ids = [x.strip() for x in fs_union_ids_raw.split(",") if x.strip()]
+    # 群聊通知：chat_id（备选，应用需已加入群）
+    fs_chat_id = env("FEISHU_CHAT_ID")
+    # Webhook 备选（二选一即可，都不配就只打印日志）
+    fs_webhook_url = env("FEISHU_WEBHOOK_URL")
     fs_webhook_secret = env("FEISHU_WEBHOOK_SECRET")
 
     # 多维表格相关（DELIVERY_MODE=bitable 时必填）
@@ -1170,14 +1185,30 @@ def main() -> int:
             filter_desc=filter_desc,
         )
 
-        # 通知发送：优先 IM API（chat_id），fallback Webhook，都没有则打印日志
+        # 通知发送优先级：
+        #   1) Union ID 私聊（FEISHU_UNION_IDS，逗号分隔，多个用户循环发）— 推荐
+        #   2) 群聊（FEISHU_CHAT_ID）— 备选
+        #   3) 自定义机器人 Webhook — 兜底
+        #   三者都没配 → 只打印日志
         notified = False
-        if fs_chat_id and fs_token:
+
+        if fs_union_ids and fs_token:
+            for i, uid in enumerate(fs_union_ids, 1):
+                try:
+                    feishu_send_im_text(fs_token, uid, notify_text,
+                                        receive_id_type="union_id")
+                    notified = True
+                except Exception as exc:
+                    print(f"[警告] IM API 私聊通知发送失败 ({i}/{len(fs_union_ids)}, "
+                          f"union_id={uid[:8]}...): {exc}")
+
+        if not notified and fs_chat_id and fs_token:
             try:
-                feishu_send_im_text(fs_token, fs_chat_id, notify_text)
+                feishu_send_im_text(fs_token, fs_chat_id, notify_text,
+                                    receive_id_type="chat_id")
                 notified = True
             except Exception as exc:
-                print(f"[警告] IM API 通知发送失败: {exc}")
+                print(f"[警告] IM API 群聊通知发送失败: {exc}")
 
         if not notified and fs_webhook_url:
             try:
