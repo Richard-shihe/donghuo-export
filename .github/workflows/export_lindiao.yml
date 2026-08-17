@@ -1,4 +1,4 @@
-name: 自动导出临调库存并上传飞书云盘
+name: 自动导出临调库存并交付飞书（云盘+多维表格）
 
 # 触发方式：
 # 可在 Actions 页面手动点击 "Run workflow" 立即触发
@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   export-and-upload:
-    name: 导出临调库存 → 上传飞书云盘 → 通知
+    name: 导出临调库存 → 上传云盘 + 写多维表格 → 通知
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -35,22 +35,34 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: 运行临调库存导出脚本 → 上传飞书云盘 → 通知
+      - name: 运行临调库存导出脚本 → 交付飞书 → 通知
         env:
-          # ===== 交付方式：feishu（默认） 或 local（仅本地保存，无意义，CI 里请用 feishu）=====
-          DELIVERY_MODE: ${{ vars.LD_DELIVERY_MODE || 'feishu' }}
+          # ===== 交付方式 =====
+          #   both    (默认)：同时上传云盘 + 写多维表格
+          #   feishu        : 仅上传 CSV 到飞书云盘指定文件夹
+          #   bitable       : 仅把数据追加写入飞书多维表格
+          #   local         : 仅本地保存（CI 无意义，仅本地调试用）
+          # 想切换模式时，在仓库 Variables 中加 LD_DELIVERY_MODE=<上面任一值>
+          DELIVERY_MODE: ${{ vars.LD_DELIVERY_MODE || 'both' }}
 
           # ===== 懂火系统账号（在仓库 Secrets 中配置） =====
           DH_USERNAME: ${{ secrets.DH_USERNAME }}
           DH_PASSWORD: ${{ secrets.DH_PASSWORD }}
 
-          # ===== 飞书云盘（主模式） =====
-          # 企业自建应用的 App ID / App Secret
+          # ===== 飞书自建应用凭证（在仓库 Secrets 中配置） =====
           FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
           FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
-          # 目标文件夹 token (临调库存（欧冶资源）文件夹 O8i6fsf5dlQtX3ds3D2cjGQtnVh)
+
+          # ===== feishu 模式专用：目标云盘文件夹 token =====
+          # 临调库存（欧冶资源）文件夹 O8i6fsf5dlQtX3ds3D2cjGQtnVh
           FEISHU_FOLDER_TOKEN: ${{ secrets.LD_FOLDER_TOKEN }}
-          # 通知机器人 Webhook（可选，上传成功后发通知）
+
+          # ===== bitable 模式专用：多维表格 app_token 与 目标 table_id =====
+          # 注：飞书应用需对该多维表格有「可编辑」协作者权限
+          BITABLE_APP_TOKEN: "IRCzb5XVganwbUsz9NKcaC0SnRA"
+          BITABLE_TABLE_ID: "tblaHMNprLueWYDP"
+
+          # ===== 通知机器人 Webhook（可选，所有模式通用） =====
           FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
           FEISHU_WEBHOOK_SECRET: ${{ secrets.FEISHU_WEBHOOK_SECRET }}
 
@@ -75,4 +87,4 @@ jobs:
       - name: 失败时告警
         if: failure()
         run: |
-          echo "::warning:: 临调库存自动导出失败，请检查 Secrets 配置或目标网站状态"
+          echo "::warning:: 临调库存自动导出失败，请检查 Secrets/Variables 配置或目标网站状态"

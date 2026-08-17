@@ -538,82 +538,96 @@ def main() -> int:
         print(f"  {line}")
 
     # 4) 交付
+    # 支持的模式：
+    #   local  : 仅本地保存 CSV
+    #   feishu : 上传 CSV 到飞书云盘
+    #   bitable: 追加写入飞书多维表格
+    #   both   : 先上传云盘，再写多维表格
+    actions: list[str] = []
     if delivery_mode == "local":
         out_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
         with open(out_path, "wb") as fp:
             fp.write(csv_bytes)
         print(f"\n[本地保存] 已保存到 {out_path}")
         return 0
+    elif delivery_mode == "feishu":
+        actions = ["feishu"]
+    elif delivery_mode == "bitable":
+        actions = ["bitable"]
+    elif delivery_mode == "both":
+        actions = ["feishu", "bitable"]
+    else:
+        print(f"[错误] 未识别的 DELIVERY_MODE: {delivery_mode}")
+        return 5
 
-    if delivery_mode == "feishu":
-        if not (fs_app_id and fs_app_secret and fs_folder_token):
-            print("[错误] 未配置完整飞书参数（FEISHU_APP_ID / FEISHU_APP_SECRET / FEISHU_FOLDER_TOKEN）")
-            print("       可设 DELIVERY_MODE=local 仅本地保存")
-            return 4
+    # 飞书 token（feishu / bitable / both 都需要）
+    try:
+        fs_token = feishu_tenant_access_token(fs_app_id, fs_app_secret)
+    except Exception as exc:
+        print(f"[错误] 获取飞书 tenant_access_token 失败: {exc}")
+        return 4
 
-        try:
-            token = feishu_tenant_access_token(fs_app_id, fs_app_secret)
-            file_info = feishu_upload_to_folder(token, fs_folder_token,
-                                                csv_bytes, filename)
-            file_token = file_info.get("file_token") or file_info.get("token") or ""
+    rc = 0
+    file_token = ""
+    bitable_created = 0
+    for action in actions:
+        print(f"\n========== 交付动作: {action} ==========")
+        if action == "feishu":
+            if not (fs_app_id and fs_app_secret and fs_folder_token):
+                print("[错误] feishu 缺少 FEISHU_APP_ID / FEISHU_APP_SECRET / FEISHU_FOLDER_TOKEN")
+                rc = 4
+                continue
+            try:
+                file_info = feishu_upload_to_folder(fs_token, fs_folder_token,
+                                                    csv_bytes, filename)
+                file_token = file_info.get("file_token") or file_info.get("token") or ""
+                print(f"[feishu] 已上传到云盘 file_token={file_token}")
+            except Exception as exc:
+                print(f"[错误] 飞书云盘上传失败: {exc}")
+                traceback.print_exc()
+                rc = 4
+                continue
 
-            # 通知
-            notify_lines = [f"✅ 临调库存导出完成"] + summary_lines
-            notify_lines.append(f"文件位置: 飞书云盘指定文件夹")
-            if file_token:
-                notify_lines.append(f"file_token: {file_token}")
-            notify_text = "\n".join(notify_lines)
+        elif action == "bitable":
+            if not (bitable_app_token and bitable_table_id):
+                print("[错误] bitable 缺少 BITABLE_APP_TOKEN / BITABLE_TABLE_ID")
+                rc = 4
+                continue
+            try:
+                result = bitable_append_records(
+                    fs_token, bitable_app_token, bitable_table_id, rows)
+                bitable_created = result.get("created", 0)
+                print(f"[bitable] 写入 {bitable_created} 条")
+            except Exception as exc:
+                print(f"[错误] bitable 写入失败: {exc}")
+                traceback.print_exc()
+                rc = 4
+                continue
 
-            if fs_webhook_url:
-                try:
-                    feishu_send_bot_text(fs_webhook_url, fs_webhook_secret, notify_text)
-                except Exception as exc:
-                    print(f"[警告] 通知发送失败，但上传已完成: {exc}")
-            else:
-                print("\n[通知内容]")
-                print(notify_text)
-        except Exception as exc:
-            print(f"[错误] 飞书交付失败: {exc}")
-            traceback.print_exc()
-            return 4
-        return 0
-
-    # 交付：飞书多维表格（追加，不去重）
-    if delivery_mode == "bitable":
-        if not (fs_app_id and fs_app_secret):
-            print("[错误] bitable 模式缺少 FEISHU_APP_ID / FEISHU_APP_SECRET")
-            return 4
-        if not (bitable_app_token and bitable_table_id):
-            print("[错误] bitable 模式缺少 BITABLE_APP_TOKEN / BITABLE_TABLE_ID")
-            return 4
-
-        try:
-            token = feishu_tenant_access_token(fs_app_id, fs_app_secret)
-            result = bitable_append_records(
-                token, bitable_app_token, bitable_table_id, rows)
-
-            notify_lines = [f"✅ 临调库存已写入飞书多维表格"] + summary_lines
+    # 汇总通知
+    if rc == 0:
+        ok_parts = []
+        if "feishu" in actions:
+            ok_parts.append("已上传云盘")
+        if "bitable" in actions:
+            ok_parts.append(f"已写入多维表格 {bitable_created} 条")
+        notify_lines = [f"✅ 临调库存导出完成（{' + '.join(ok_parts)}）"] + summary_lines
+        if "feishu" in actions and file_token:
+            notify_lines.append(f"file_token: {file_token}")
+        if "bitable" in actions:
             notify_lines.append(f"app_token: {bitable_app_token}")
             notify_lines.append(f"table_id: {bitable_table_id}")
-            notify_lines.append(f"写入条数: {result.get('created', 0)}")
-            notify_text = "\n".join(notify_lines)
+        notify_text = "\n".join(notify_lines)
+        if fs_webhook_url:
+            try:
+                feishu_send_bot_text(fs_webhook_url, fs_webhook_secret, notify_text)
+            except Exception as exc:
+                print(f"[警告] 通知发送失败: {exc}")
+        else:
+            print("\n[通知内容]")
+            print(notify_text)
 
-            if fs_webhook_url:
-                try:
-                    feishu_send_bot_text(fs_webhook_url, fs_webhook_secret, notify_text)
-                except Exception as exc:
-                    print(f"[警告] 通知发送失败，但 bitable 写入已完成: {exc}")
-            else:
-                print("\n[通知内容]")
-                print(notify_text)
-        except Exception as exc:
-            print(f"[错误] bitable 写入失败: {exc}")
-            traceback.print_exc()
-            return 4
-        return 0
-
-    print(f"[错误] 未识别的 DELIVERY_MODE: {delivery_mode}")
-    return 5
+    return rc
 
 
 if __name__ == "__main__":
