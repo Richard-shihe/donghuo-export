@@ -435,7 +435,12 @@ BITABLE_FIELD_TYPES: dict[str, str] = {
     "车船号": "text", "提单号": "text", "备注": "text",
     "件(张)数": "number", "重量": "number", "销售单价": "number",
     "入库日期": "datetime",
+    # 两个批次标识字段（都注入同一个 batch_ts_ms）：
+    # - "创建时间"：用户指定用作删除最早批次的排序/筛选字段
+    # - "时间"    ：飞书表中原本存在的列（若开启了默认值会被飞书自动写入服务器时间），
+    #               我们主动覆盖它，保证和"创建时间"毫秒级完全一致，避免视觉分裂
     "创建时间": "datetime",
+    "时间": "datetime",
 }
 
 # batch_create 单次最多 500 条
@@ -570,9 +575,13 @@ def bitable_append_records(token: str, app_token: str, table_id: str,
             if v is None or (isinstance(v, str) and not v):
                 continue
             fields[col_name] = v
-        # 注入批次时间戳（覆盖 row 里可能为空的"创建时间"字段）
+        # 注入批次时间戳（覆盖所有"时间"列）：
+        # 同时写入「创建时间」和「时间」两个字段，毫秒级完全相同的 batch_ts_ms。
+        # 这样既覆盖了飞书表"时间"列可能存在的"创建记录时自动填充当前时间"默认值，
+        # 也确保用户在 UI 里看任何一个时间列都一致（每一行、每一列都一样）。
         if batch_ts_ms is not None:
             fields["创建时间"] = batch_ts_ms
+            fields["时间"] = batch_ts_ms
         # 记录哪些 CSV 字段未在映射中（仅第一次出现时打印）
         for col_name in row.keys():
             if col_name not in BITABLE_FIELD_TYPES:
