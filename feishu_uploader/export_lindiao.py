@@ -1034,13 +1034,14 @@ def main() -> int:
     print(f"[解析] 数据源: {data_source}; CSV: {row_count} 行 (含表头), {col_count} 列, "
           f"{len(csv_bytes)/1024:.1f} KB")
 
-    now = datetime.datetime.now()
-    filename = f"lindiao_{now.strftime('%Y%m%d_%H%M%S')}.csv"
-
-    # 批次时间戳：写入多维表格"创建时间"字段，作为批次标识
-    # batch_ts_sec 秒级（用于 AI 反馈文本显示）；batch_ts_ms 毫秒级（飞书 datetime 字段）
+    # 统一时间戳：所有"时间"字段（文件名、多维表格"创建时间"、AI 反馈文本前缀、
+    # 通知"执行时间"行、汇总"导出时间"）都基于同一个 batch_ts_sec 派生，
+    # 确保整批更新的"时间"标识完全一致。
     batch_ts_sec = int(time.time())
     batch_ts_ms = batch_ts_sec * 1000
+    now = datetime.datetime.fromtimestamp(batch_ts_sec)
+    filename = f"lindiao_{now.strftime('%Y%m%d_%H%M%S')}.csv"
+
     today_date = epoch_ms_to_shanghai_date(batch_ts_ms)
     exec_time_str = now.strftime("%Y-%m-%d %H:%M:%S")
 
