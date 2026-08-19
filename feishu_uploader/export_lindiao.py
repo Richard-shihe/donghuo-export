@@ -846,14 +846,15 @@ def bitable_update_ai_feedback(token: str, app_token: str,
 
 
 def bitable_sync_bundle_numbers(token: str, app_token: str,
-                                  src_table_id: str, dst_table_id: str,
+                                  dst_table_id: str,
+                                  bundle_numbers: list[str],
                                   field_name: str = BUNDLE_SYNC_FIELD) -> dict:
     """
-    把 src_table_id 的 field_name（默认"捆包号"）全量同步到 dst_table_id 的同名字段。
+    把 bundle_numbers 列表全量同步到 dst_table_id 的 field_name 字段。
+    （即"最新一次录入"的捆包号镜像，不是源表全量历史数据）
     流程：
       1. 列出 dst_table_id 所有 record_id，分批硬删（≤100/批）
-      2. 列出 src_table_id 所有记录，收集 field_name 的值
-      3. 分批 batch_create 到 dst_table_id（≤500/批），每条记录只写 field_name 字段
+      2. batch_create 到 dst_table_id（≤500/批），每条记录只写 field_name 字段
     返回: {"deleted": N, "created": M, "skipped": bool, "skip_reason": str}
     失败不抛异常，记录在 skip_reason 中。
     """
@@ -925,65 +926,20 @@ def bitable_sync_bundle_numbers(token: str, app_token: str,
     result["deleted"] = deleted_count
     print(f"[sync] 步骤1 完成: 删除 {deleted_count}/{len(dst_record_ids)} 条")
 
-    # ---- 步骤 2: 从 src 表读取所有 field_name 值 ----
-    print(f"[sync] 步骤2: 从源表 {src_table_id} 读取 '{field_name}' 全量数据")
-    src_list_url = (f"{FEISHU_OPEN_BASE}/bitable/v1/apps/{app_token}"
-                    f"/tables/{src_table_id}/records")
-    bundle_values: list[str] = []
-    page_token = None
-    page = 1
-    while True:
-        params = {"page_size": 500}
-        if page_token:
-            params["page_token"] = page_token
-        try:
-            r = requests.get(src_list_url, headers=headers, params=params, timeout=30)
-            data = r.json()
-        except Exception as exc:
-            result["skipped"] = True
-            result["skip_reason"] = f"列 src 表异常: {exc}"
-            print(f"[sync] 列 src 表异常: {exc}")
-            return result
-        if data.get("code") != 0:
-            result["skipped"] = True
-            result["skip_reason"] = (f"列 src 表 code={data.get('code')}, "
-                                      f"msg={data.get('msg')}")
-            print(f"[sync] 列 src 表失败: code={data.get('code')}, "
-                  f"msg={data.get('msg')}")
-            return result
-        items = (data.get("data") or {}).get("items") or []
-        for it in items:
-            # 捆包号字段可能是 text 类型，飞书返回 [list of {type:text,text:val}] 或纯字符串
-            v = (it.get("fields") or {}).get(field_name)
-            if v is None:
-                continue
-            # 兼容飞书 text 字段返回的 [{"type":"text","text":"BZ001"}] 结构
-            if isinstance(v, list) and v and isinstance(v[0], dict):
-                v = "".join(seg.get("text", "") for seg in v if isinstance(seg, dict))
-            if isinstance(v, str) and v.strip():
-                bundle_values.append(v.strip())
-        page_token = (data.get("data") or {}).get("page_token") or ""
-        has_more = (data.get("data") or {}).get("has_more")
-        print(f"  [list-src] page {page}: +{len(items)}, "
-              f"累计 {len(bundle_values)}, has_more={has_more}")
-        if not has_more or not page_token:
-            break
-        page += 1
-        time.sleep(0.1)
-
-    print(f"[sync] 源表共取到 {len(bundle_values)} 个 '{field_name}' 值")
-    if not bundle_values:
-        result["skip_reason"] = "源表无捆包号数据"
+    # ---- 步骤 2: batch_create 到 dst 表 ----
+    # bundle_numbers 是本次 workflow 刚从懂火导出并写入主表的最新一批捆包号
+    # （即"定价视图"应该展示的那批），直接用，无需再回查源表
+    if not bundle_numbers:
+        result["skip_reason"] = "本批无捆包号数据"
         return result
 
-    # ---- 步骤 3: batch_create 到 dst 表 ----
-    print(f"[sync] 步骤3: 写入 {len(bundle_values)} 条到 dst 表 {dst_table_id}")
-    records_payload = [{"fields": {field_name: v}} for v in bundle_values]
+    print(f"[sync] 步骤2: 写入 {len(bundle_numbers)} 条到 dst 表 {dst_table_id}")
+    records_payload = [{"fields": {field_name: v}} for v in bundle_numbers]
     try:
         created = bitable_batch_create(token, app_token, dst_table_id,
                                         records_payload)
         result["created"] = len(created)
-        print(f"[sync] 步骤3 完成: 写入 {len(created)}/{len(bundle_values)} 条")
+        print(f"[sync] 步骤2 完成: 写入 {len(created)}/{len(bundle_numbers)} 条")
     except Exception as exc:
         result["skipped"] = True
         result["skip_reason"] = f"batch_create 异常: {exc}"
@@ -1344,14 +1300,19 @@ def main() -> int:
                 print(f"[警告] AI 反馈更新异常: {exc}")
                 traceback.print_exc()
 
-            # 同步捆包号到汇总表 tblDFiiwWkJ5tZp3
-            # （清空目标表 → 把主表"捆包号"字段全量写入）
+            # 同步本批捆包号到汇总表 tblDFiiwWkJ5tZp3
+            # （清空目标表 → 把本次刚写入的捆包号列表写入，即"定价视图"的最新一批）
             try:
                 print("\n========== 同步捆包号到汇总表 ==========")
+                bundle_numbers = [
+                    r.get("捆包号", "").strip()
+                    for r in rows
+                    if r.get("捆包号", "").strip()
+                ]
                 sync_result = bitable_sync_bundle_numbers(
                     fs_token, bitable_app_token,
-                    src_table_id=bitable_table_id,
                     dst_table_id=BUNDLE_SYNC_TABLE_ID,
+                    bundle_numbers=bundle_numbers,
                 )
             except Exception as exc:
                 print(f"[警告] 同步捆包号异常: {exc}")
