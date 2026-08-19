@@ -1,0 +1,75 @@
+name: 懂火采购订单 → 飞书多维表（路线B-导出）
+
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "只拉前 N 个订单（留空=全部）"
+        required: false
+        type: string
+        default: ""
+      skip_ruku_done:
+        description: "跳过已入库的明细（入库操作=已足量）"
+        required: false
+        type: boolean
+        default: false
+      dry_run:
+        description: "预览模式（不写飞书表，只打印计划）"
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: export-caigou-to-bitable
+  cancel-in-progress: false
+
+jobs:
+  export-caigou:
+    name: 懂火采购订单 → 飞书多维表
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 运行 export_caigou_to_bitable.py
+        env:
+          DH_USERNAME: ${{ secrets.DH_USERNAME }}
+          DH_PASSWORD: ${{ secrets.DH_PASSWORD }}
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
+          FEISHU_WEBHOOK_SECRET: ${{ secrets.FEISHU_WEBHOOK_SECRET }}
+          BITABLE_APP_TOKEN: ${{ vars.BITABLE_APP_TOKEN || 'OSuobf2ZkaWtUAsXEE9c3aBTnwh' }}
+          BITABLE_TABLE_ID: ${{ vars.BITABLE_TABLE_ID || 'tblrhqzHuTsAprU3' }}
+          TZ: "Asia/Shanghai"
+        run: |
+          ARGS=""
+          if [ "${{ fromJSON(inputs.dry_run) }}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+            echo "⚠️  预览模式（不写飞书表）"
+          else
+            echo "✅ 实际执行模式（写入飞书表）"
+          fi
+          if [ -n "${{ inputs.limit }}" ]; then
+            ARGS="$ARGS --limit ${{ inputs.limit }}"
+          fi
+          if [ "${{ fromJSON(inputs.skip_ruku_done) }}" = "true" ]; then
+            ARGS="$ARGS --skip-ruku-done"
+          fi
+          echo "最终参数: $ARGS"
+          python export_caigou_to_bitable.py $ARGS
+          EXIT_CODE=$?
+          echo "脚本退出码: $EXIT_CODE"
+          exit $EXIT_CODE
