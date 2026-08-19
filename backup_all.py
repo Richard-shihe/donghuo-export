@@ -54,9 +54,9 @@ import datetime
 import traceback
 from pathlib import Path
 
-# 调试用默认账号（不提交，生产环境走 GitHub Secrets）
-os.environ.setdefault("DH_USERNAME", "HONG@shihe.donghuo")
-os.environ.setdefault("DH_PASSWORD", "richardhong")
+# 调试用默认账号（不提交，生产环境走 GitHub Secrets / 系统环境变量）
+os.environ.setdefault("DH_USERNAME", os.environ.get("DH_USERNAME") or "")
+os.environ.setdefault("DH_PASSWORD", os.environ.get("DH_PASSWORD") or "")
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from donghuo_login import login_donghuo, BASE_URL

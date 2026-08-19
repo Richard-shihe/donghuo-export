@@ -1,65 +1,38 @@
-# ===== 敏感文件（含真实凭据，切勿提交）=====
-# 本地启动脚本，含真实账号/密钥，每人各自维护
-feishu_uploader/run_upload.bat
-.env
-.env.*
-
-# ===== Python =====
+# --- Python / bytecode / cache
 __pycache__/
 *.py[cod]
-*.egg-info/
+*$py.class
+*.so
+
+# --- Virtual envs
 .venv/
 venv/
+env/
+.conda/
 
-# ===== 运行产物 =====
+# --- IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# --- Credentials / secrets
+.env
+.env.local
+.boto
+.aws
+
+# --- Temp / output data files
 *.log
 *.csv
-*.xlsx
+!match*.csv-ignore
+*.tmp
+*.bak
 
-# ===== IECC / 其他平台登录态（含 token，敏感，切勿提交）=====
-iecc.json
-ibaosteel_*.json
-ibaosteel_*.txt
-*.state.json
-
-# ===== 一次性诊断/测试脚本（含硬编码 app_token，不提交）=====
-feishu_uploader/diag_*.py
-feishu_uploader/diag_*.html
-feishu_uploader/test_*.py
-feishu_uploader/append_to_bitable.py
-feishu_uploader/get_view_fields.py
-feishu_uploader/export_jiagong.py
-
-# ===== 根目录临时探查/调试脚本（开发期产物，不提交）=====
-explore_*.py
-dump_*.py
-dump_*.html
-probe_*.py
-sample_apis.py
-test_*.py
-_*.py
-
-# ===== 本地备份目录 =====
-backup_local/
-backup_local_xlsx_smoke/
-
-# ===== 探查结果 JSON / HTML 快照 =====
-*_results.json
-*_explore_results.json
-api_probe_results.json
-api_samples.json
-apis.json
-final_apis.json
-guess_results.json
-pages_map.json
-explore_index.html
-homepage_after_login.html
-winformpop_home.html
-
-# ===== IDE 本地配置 =====
-.trae/
-.vscode/
-
-# ===== 系统 =====
-.DS_Store
+# --- OS
 Thumbs.db
+.DS_Store
+desktop.ini
+
+# --- Trae / memory
+.trae/
