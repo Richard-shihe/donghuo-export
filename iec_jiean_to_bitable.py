@@ -277,11 +277,14 @@ def iec_login_and_enter() -> tuple[IEC, requests.Session, str]:
         print(f"[IEC] index  body[:500]={r0.text[:500]}")
         r0.raise_for_status()
 
+    # goodsProduction/initLoads 可能 500（IEC 后端对 goodsProduction 模块的处理和
+    # quasiHair 不同），但 queryProduction API 仍然可以用。所以这里不 raise，
+    # 只打印警告，让后续 queryProduction 自己试。
     r1 = s.get(PROD_PAGE, timeout=20, headers={"Referer": ref})
     print(f"[IEC] initLoads  status={r1.status_code}  len={len(r1.text)}")
     if r1.status_code != 200:
+        print(f"[IEC] initLoads  ⚠️ 非 200 但不中断，继续试 queryProduction")
         print(f"[IEC] initLoads  body[:500]={r1.text[:500]}")
-        r1.raise_for_status()
 
     return iec, s, token
 
