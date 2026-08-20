@@ -266,8 +266,9 @@ def iec_login_and_enter() -> tuple[IEC, requests.Session, str]:
     iec.save("iecc.json")
     s = iec.session
     token = iec.token
-    ref = f"{IECS_INDEX}?token={token}"
-    s.get(f"{IECS_INDEX}?token={token}", timeout=20, headers={"Referer": ref}).raise_for_status()
+    # 注意：IEC 后端只认 access_token 参数（不是 token），传 token= 会直接 401
+    ref = f"{IECS_INDEX}?access_token={token}"
+    s.get(ref, timeout=20, headers={"Referer": ref}).raise_for_status()
     s.get(PROD_PAGE, timeout=20, headers={"Referer": ref}).raise_for_status()
     return iec, s, token
 
