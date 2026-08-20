@@ -267,10 +267,22 @@ def iec_login_and_enter() -> tuple[IEC, requests.Session, str]:
     iec.save("iecc.json")
     s = iec.session
     token = iec.token
-    # IEC 后端只认 access_token 参数（不是 token），传 token= 会直接 401
-    ref = f"{IECS_INDEX}?access_token={token}"
-    s.get(ref, timeout=20, headers={"Referer": ref}).raise_for_status()
-    s.get(PROD_PAGE, timeout=20, headers={"Referer": ref}).raise_for_status()
+    print(f"[IEC] login OK, token={token[:10]}..., session cookies={dict(s.cookies)}")
+
+    # 和 download_bundle.py 一致，用 ?token=（不是 ?access_token=）
+    ref = f"{IECS_INDEX}?token={token}"
+    r0 = s.get(ref, timeout=20, headers={"Referer": ref})
+    print(f"[IEC] index  status={r0.status_code}  len={len(r0.text)}  cookies_after={dict(s.cookies)}")
+    if r0.status_code != 200:
+        print(f"[IEC] index  body[:500]={r0.text[:500]}")
+        r0.raise_for_status()
+
+    r1 = s.get(PROD_PAGE, timeout=20, headers={"Referer": ref})
+    print(f"[IEC] initLoads  status={r1.status_code}  len={len(r1.text)}")
+    if r1.status_code != 200:
+        print(f"[IEC] initLoads  body[:500]={r1.text[:500]}")
+        r1.raise_for_status()
+
     return iec, s, token
 
 
