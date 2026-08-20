@@ -34,21 +34,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      # 飞书应用凭证（FEISHU_APP_ID/FEISHU_APP_SECRET）复用仓库已有的 Secrets
+      # 其余配置（多维表 app_token、收件人 Union ID）已在脚本中硬编码默认值，无需单独建 Secret
       - name: 运行欧冶模板导出脚本 → 生成 Excel → 飞书 IM 发送
         env:
-          # ===== 飞书自建应用凭证（在仓库 Secrets 中配置） =====
-          # 注：应用需对多维表格有「可编辑」协作者权限，且 im:message:send_as_bot 权限已开通
           FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
           FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
-
-          # ===== 多维表格 app_token（默认 IRCzb5XVganwbUsz9NKcaC0SnRA，可覆盖） =====
-          BITABLE_APP_TOKEN: ${{ vars.OUYEEL_BITABLE_APP_TOKEN || 'IRCzb5XVganwbUsz9NKcaC0SnRA' }}
-
-          # ===== 收件人 Union ID（多个用英文逗号分隔） =====
-          # 留空时使用脚本内置默认值（on_93da40c6...,on_b09bcbf3...）
-          FEISHU_UNION_IDS: ${{ secrets.OUYEEL_UNION_IDS }}
-
-          # 时区（确保文件名时间、日期正确）
           TZ: "Asia/Shanghai"
         run: |
           python export_ouyeel_exel.py
@@ -59,4 +50,4 @@ jobs:
       - name: 失败时告警
         if: failure()
         run: |
-          echo "::warning:: 欧冶模板 Excel 导出/发送失败，请检查 Secrets/Variables 配置或飞书应用权限"
+          echo "::warning:: 欧冶模板 Excel 导出/发送失败，请检查飞书应用凭证或权限配置"
