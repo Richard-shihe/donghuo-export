@@ -1,0 +1,157 @@
+name: 结案——IEC生产跟踪 → 飞书多维表进度=结案
+
+# 触发方式：
+#   可在 Actions 页面手动点击 "Run workflow" 立即触发
+#   （如需每天定时自动结案，后续可在 on 下加 schedule cron）
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "手动触发说明（可选）"
+        required: false
+        default: "手动立即执行：IEC 结案 → 飞书多维表"
+      start_ym:
+        description: "交期起始月 YYYYMM（留空=前 4 个月）"
+        required: false
+        default: ""
+      end_ym:
+        description: "交期结束月 YYYYMM（留空=后 1 个月）"
+        required: false
+        default: ""
+      dry_run:
+        description: "dry-run 预览（true） 还是 实际 UPDATE 写'结案'（false）"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      update_limit:
+        description: "最大 UPDATE 条数（留空=不限；建议第一次真实执行先填 10）"
+        required: false
+        default: ""
+      log_match_file:
+        description: "是否在工作流 Artifacts 里输出逐行匹配 CSV（true/false）"
+        required: false
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+
+# 并发控制：同一时刻只跑一个实例
+concurrency:
+  group: iec-jiean-sync
+  cancel-in-progress: false
+
+jobs:
+  jiean-sync:
+    name: IEC 生产跟踪 → 飞书多维表 结案同步
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 安装 Python 依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 执行 IEC 结案同步
+        env:
+          # ===== 宝钢 IEC 系统账号（在仓库 Settings → Secrets 中配置） =====
+          IBAO_USERNAME: ${{ secrets.IBAO_USERNAME }}
+          IBAO_PASSWORD: ${{ secrets.IBAO_PASSWORD }}
+
+          # ===== 飞书多维表写入用自建应用（Secrets 配置） =====
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          BITABLE_APP_TOKEN: ${{ vars.BITABLE_APP_TOKEN || 'Tz0XbQVzkaZuJasBwb8cRjkfnoe' }}
+          BITABLE_TABLE_ID:  ${{ vars.BITABLE_TABLE_ID  || 'tblvugnoJPS8GrpX' }}
+
+          # ===== 飞书通知专用应用（如果和多维表不是同一个应用，在这里覆盖） =====
+          FEISHU_NOTIFY_APP_ID:     ${{ secrets.FEISHU_NOTIFY_APP_ID     || secrets.FEISHU_APP_ID }}
+          FEISHU_NOTIFY_APP_SECRET: ${{ secrets.FEISHU_NOTIFY_APP_SECRET || secrets.FEISHU_APP_SECRET }}
+
+          # ===== 推送名单（Union ID 最稳；留空=脚本内置 2 人：洪、王阳） =====
+          NOTIFY_USERS: ${{ vars.JIEAN_NOTIFY_USERS || '' }}
+          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL || '' }}
+          FEISHU_WEBHOOK_SECRET: ${{ secrets.FEISHU_WEBHOOK_SECRET || '' }}
+
+          # 时区（确保日期范围、日志时间、导出月正确）
+          TZ: "Asia/Shanghai"
+
+        run: |
+          set -euo pipefail
+
+          # === 基本必填 Secret 检查 ===
+          need_secret() {
+            if [ -z "${!1}" ]; then
+              echo "::error:: 缺少 Secrets: $1，请在仓库 Settings → Secrets and variables → Actions → Secrets 中配置"
+              ERR=1
+            fi
+          }
+          ERR=0
+          need_secret IBAO_USERNAME
+          need_secret IBAO_PASSWORD
+          need_secret FEISHU_APP_ID
+          need_secret FEISHU_APP_SECRET
+          [ "$ERR" = "0" ] || exit 1
+          echo "=== Secrets 必填项检查通过 ==="
+          echo "IBAO_USERNAME       = ${IBAO_USERNAME:0:3}***"
+          echo "FEISHU_APP_ID       = ${FEISHU_APP_ID:0:7}***"
+          if [ -n "$FEISHU_NOTIFY_APP_ID" ]; then
+            echo "NOTIFY_APP_ID        = ${FEISHU_NOTIFY_APP_ID:0:7}***"
+          else
+            echo "NOTIFY_APP_ID        = (与 FEISHU_APP_ID 相同)"
+          fi
+
+          # === 组装命令行参数 ===
+          CMD=( python iec_jiean_to_bitable.py )
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            CMD+=( --dry-run )
+          fi
+          if [ -n "${{ inputs.start_ym }}" ]; then
+            CMD+=( --start "${{ inputs.start_ym }}" )
+          fi
+          if [ -n "${{ inputs.end_ym }}" ]; then
+            CMD+=( --end   "${{ inputs.end_ym }}" )
+          fi
+          if [ -n "${{ inputs.update_limit }}" ]; then
+            CMD+=( --update-limit "${{ inputs.update_limit }}" )
+          fi
+          # 始终打 verbose，方便 GitHub Actions 日志追溯
+          CMD+=( -v )
+          CSV_NAME=""
+          if [ "${{ inputs.log_match_file }}" = "true" ]; then
+            TS="$(date +%Y%m%d_%H%M%S)"
+            DRYTAG="$( [ "${{ inputs.dry_run }}" = "true" ] && echo 'dryrun' || echo 'real' )"
+            CSV_NAME="match_jiean_${DRYTAG}_${TS}.csv"
+            CMD+=( --log-match "$CSV_NAME" )
+          fi
+          echo "[CMD] ${CMD[*]}"
+          "${CMD[@]}"
+          # 传递 CSV 文件名到下一步（若有）
+          if [ -n "$CSV_NAME" ]; then
+            echo "CSV_NAME=$CSV_NAME" >> "$GITHUB_ENV"
+          fi
+
+      - name: 上传匹配 CSV 明细（Artifacts，保留 30 天）
+        if: env.CSV_NAME != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.CSV_NAME }}
+          path: ${{ env.CSV_NAME }}
+          retention-days: 30
+
+      - name: 失败时告警
+        if: failure()
+        run: |
+          echo "::warning:: 结案同步失败：请检查 Secrets、IEC 登录是否有效、飞书应用是否有 tblvugnoJPS8GrpX 的'进度'字段写入权限"
