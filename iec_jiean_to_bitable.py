@@ -632,10 +632,18 @@ def bitable_update_jindu(token: str, app_token: str, table_id: str,
         sample = sorted(not_in_bitable)[:10]
         print(f"  未命中 Bitable 样例({len(sample)}/{len(not_in_bitable)}): {sample}")
 
+    match_stats = {
+        "intersect": len(intersect),                # 命中 Bitable 资源号
+        "not_in_bitable": len(not_in_bitable),     # IEC 有但 Bitable 无
+        "skipped_done": skipped_done,              # 命中但进度已是结案
+        "cutoff": cutoff_count,                     # 被 update_limit 截断
+        "bitable_ziyuan_unique": len(ziyuan_to_rid),
+    }
+
     print(f"[UPDATE] 计划 {len(planned)} 条（排除进度已是结案的 {skipped_done} 条）")
     if not planned:
         print("  无需要更新的记录")
-        return 0, 0, 0
+        return 0, 0, 0, match_stats
 
     # 预览前 N 条（详细到每条，不只 5 条）
     preview_count = len(planned) if (verbose or len(planned) <= 20) else 5
@@ -653,7 +661,7 @@ def bitable_update_jindu(token: str, app_token: str, table_id: str,
                         Bitable_当前进度=p["old_jindu"],
                         匹配结果="DRY-RUN(未执行)",
                         细节=f"计划更新 {p['old_jindu']!r} → {JINDU_TARGET!r}")
-        return len(planned), 0, 0
+        return len(planned), 0, 0, match_stats
 
     # 每批 500 条批量更新；逐批打印每批的 资源号 列表，便于核对
     BATCH = 500
@@ -707,7 +715,7 @@ def bitable_update_jindu(token: str, app_token: str, table_id: str,
     print(f"\n[UPDATE] 完成。成功 {ok_count}  失败 {fail_count}  "
           f"跳过（已是结案）= {skipped_done}  未命中= {len(not_in_bitable)}  "
           f"被LIMIT截断= {cutoff_count}")
-    return len(planned), ok_count, fail_count
+    return len(planned), ok_count, fail_count, match_stats
 
 
 # ============================================================
@@ -852,6 +860,10 @@ DEFAULT_NOTIFY_OPEN_IDS = [
     "on_b09bcbf3e74f5d423900aa9b2f00eb63",   # 王阳
 ]
 
+# 通知专用应用 App ID（不是机密，可硬编码；真实 Secret 走环境变量 FEISHU_NOTIFY_APP_SECRET，
+# 不进仓库以避免 GitHub Push Protection 拦截）
+DEFAULT_NOTIFY_APP_ID = "cli_aaf0ce1e9ef89d27"
+
 
 def _parse_notify_users(s: str) -> list[str]:
     """把逗号/空格分隔的 open_id 列表解析成 list（保留非空）。"""
@@ -910,8 +922,8 @@ def main():
     app_token = env("BITABLE_APP_TOKEN") or DEFAULT_APP_TOKEN
     table_id = env("BITABLE_TABLE_ID") or DEFAULT_TABLE_ID
 
-    # 通知专用应用（如果没有配置，就用 Bitable 的默认 FEISHU_APP_ID 试着发）
-    notify_app_id = args.notify_app_id or env("FEISHU_NOTIFY_APP_ID") or env("FEISHU_APP_ID")
+    # 通知专用应用（如果没有配置，就用默认 cli_aaf0ce1e9ef89d27；Secret 必须走环境变量）
+    notify_app_id = args.notify_app_id or env("FEISHU_NOTIFY_APP_ID") or DEFAULT_NOTIFY_APP_ID
     notify_app_secret = args.notify_app_secret or env("FEISHU_NOTIFY_APP_SECRET") or env("FEISHU_APP_SECRET")
 
     # 构造 notify list:
@@ -995,7 +1007,7 @@ def main():
             return rc
 
         try:
-            planned, ok_count, fail_count = bitable_update_jindu(
+            planned, ok_count, fail_count, match_stats = bitable_update_jindu(
                 fs_token, app_token, table_id, records, done_set,
                 dry_run=dry_run, update_limit=args.update_limit,
                 log=log, verbose=verbose)
@@ -1007,13 +1019,16 @@ def main():
 
         # ---- Stage 3: 通知 ----
         elapsed = time.time() - t0
+        # 报告格式：去掉"已是结案跳过"汇总行和 dry-run 差异说明，保留耗时时间
+        update_line = (f"计划 UPDATE: {planned}  实际成功: {ok_count}  失败: {fail_count}"
+                       if not dry_run else f"计划 UPDATE: {planned}（DRY-RUN 未执行）")
         result_str = (
             f"【IEC结案→飞书】{'DRY-RUN ' if dry_run else ''}{time.strftime('%Y-%m-%d %H:%M:%S')}\n"
             f"交期: {start}~{end}\n"
             f"IEC 总记录: {len(all_rows)}  已完成资源号: {len(done_set)}\n"
-            f"飞书记录: {len(records)}\n"
-            f"计划 UPDATE: {planned}" + (f"  实际成功: {ok_count}  失败: {fail_count}" if not dry_run else "") + "\n"
-            f"耗时: {elapsed:.1f}s"
+            f"飞书记录: {len(records)}  匹配命中: {match_stats['intersect']}  未命中: {match_stats['not_in_bitable']}\n"
+            f"{update_line}\n"
+            f"耗时时间: {elapsed:.1f}s"
             + (f"\n详细匹配日志: {log_match_file}" if log_match_file else "")
         )
         print("\n" + "=" * 60)
