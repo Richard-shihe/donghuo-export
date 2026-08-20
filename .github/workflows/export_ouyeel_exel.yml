@@ -1,0 +1,62 @@
+name: 欧冶模板Excel导出
+
+# 触发方式：可在 Actions 页面手动点击 "Run workflow" 触发
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "手动触发说明（可选）"
+        required: false
+        default: "导出 tblDFiiwWkJ5tZp3 挂-士禾/挂-砚启 两视图 → 欧冶模板 Excel → 飞书 IM 私聊发送"
+
+# 并发控制：同一时刻只跑一个实例
+concurrency:
+  group: export-ouyeel-exel
+  cancel-in-progress: false
+
+jobs:
+  export-and-send:
+    name: 导出欧冶模板 Excel → 飞书 IM 发送
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 安装 Python 依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 运行欧冶模板导出脚本 → 生成 Excel → 飞书 IM 发送
+        env:
+          # ===== 飞书自建应用凭证（在仓库 Secrets 中配置） =====
+          # 注：应用需对多维表格有「可编辑」协作者权限，且 im:message:send_as_bot 权限已开通
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+
+          # ===== 多维表格 app_token（默认 IRCzb5XVganwbUsz9NKcaC0SnRA，可覆盖） =====
+          BITABLE_APP_TOKEN: ${{ vars.OUYEEL_BITABLE_APP_TOKEN || 'IRCzb5XVganwbUsz9NKcaC0SnRA' }}
+
+          # ===== 收件人 Union ID（多个用英文逗号分隔） =====
+          # 留空时使用脚本内置默认值（on_93da40c6...,on_b09bcbf3...）
+          FEISHU_UNION_IDS: ${{ secrets.OUYEEL_UNION_IDS }}
+
+          # 时区（确保文件名时间、日期正确）
+          TZ: "Asia/Shanghai"
+        run: |
+          python export_ouyeel_exel.py
+          EXIT_CODE=$?
+          echo "脚本退出码: $EXIT_CODE"
+          exit $EXIT_CODE
+
+      - name: 失败时告警
+        if: failure()
+        run: |
+          echo "::warning:: 欧冶模板 Excel 导出/发送失败，请检查 Secrets/Variables 配置或飞书应用权限"
