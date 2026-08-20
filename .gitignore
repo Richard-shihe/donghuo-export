@@ -21,6 +21,9 @@ env/
 .env.local
 .boto
 .aws
+iecc.json
+iecc_*.json
+*_captcha.png
 
 # --- Temp / output data files
 *.log

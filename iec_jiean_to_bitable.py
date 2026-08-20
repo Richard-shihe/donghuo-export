@@ -252,21 +252,22 @@ def _parse_month(s: str) -> str:
 # Stage 1: 登录 IEC + 分页拉 queryProduction → 解析成 dict 列表
 # ============================================================
 def iec_login_and_enter() -> tuple[IEC, requests.Session, str]:
-    """登录 IEC 并进入生产跟踪页面。返回 (iec, session, access_token)"""
+    """登录 IEC 并进入生产跟踪页面。返回 (iec, session, access_token)
+
+    注意：GitHub Actions 等 CI 环境里如果 iecc.json 被意外提交（含过期 token），
+    IEC.load() 会因为 ok=True 跳过 login()，导致后续业务页 401/500。
+    因此这里总是强制 login()，不信任缓存。
+    """
     if not _HAS_BS4:
         raise ImportError("需要 beautifulsoup4：pip install beautifulsoup4")
 
-    iec = IEC.load("iecc.json")
-    ok = iec.ok or iec.login()
-    if not ok:
-        # 重新登录
-        iec = IEC()
-        if not iec.login():
-            raise RuntimeError("IEC 登录失败")
+    iec = IEC()
+    if not iec.login():
+        raise RuntimeError("IEC 登录失败")
     iec.save("iecc.json")
     s = iec.session
     token = iec.token
-    # 注意：IEC 后端只认 access_token 参数（不是 token），传 token= 会直接 401
+    # IEC 后端只认 access_token 参数（不是 token），传 token= 会直接 401
     ref = f"{IECS_INDEX}?access_token={token}"
     s.get(ref, timeout=20, headers={"Referer": ref}).raise_for_status()
     s.get(PROD_PAGE, timeout=20, headers={"Referer": ref}).raise_for_status()

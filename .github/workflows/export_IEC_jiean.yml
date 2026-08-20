@@ -66,25 +66,25 @@ jobs:
 
       - name: 执行 IEC 结案同步
         env:
-          # ===== 宝钢 IEC 系统账号（在仓库 Settings → Secrets 中配置） =====
+          # ===== 仍需在仓库 Secrets 里配置的 4 项 =====
           IBAO_USERNAME: ${{ secrets.IBAO_USERNAME }}
           IBAO_PASSWORD: ${{ secrets.IBAO_PASSWORD }}
-
-          # ===== 飞书多维表写入用自建应用（Secrets 配置） =====
           FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
           FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
-          BITABLE_APP_TOKEN: ${{ vars.BITABLE_APP_TOKEN || 'Tz0XbQVzkaZuJasBwb8cRjkfnoe' }}
-          BITABLE_TABLE_ID:  ${{ vars.BITABLE_TABLE_ID  || 'tblvugnoJPS8GrpX' }}
 
-          # ===== 飞书通知专用应用（如果和多维表不是同一个应用，在这里覆盖） =====
-          FEISHU_NOTIFY_APP_ID:     ${{ secrets.FEISHU_NOTIFY_APP_ID     || secrets.FEISHU_APP_ID }}
-          FEISHU_NOTIFY_APP_SECRET: ${{ secrets.FEISHU_NOTIFY_APP_SECRET || secrets.FEISHU_APP_SECRET }}
-
-          # ===== 推送名单（Union ID 最稳；留空=脚本内置 2 人：洪、王阳） =====
-          NOTIFY_USERS: ${{ vars.JIEAN_NOTIFY_USERS || '' }}
-          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL || '' }}
-          FEISHU_WEBHOOK_SECRET: ${{ secrets.FEISHU_WEBHOOK_SECRET || '' }}
-
+          # ===== 其它全部直接写在这里，不用再去 Secrets/Variables 面板配 =====
+          # 飞书多维表位置
+          BITABLE_APP_TOKEN: "Tz0XbQVzkaZuJasBwb8cRjkfnoe"
+          BITABLE_TABLE_ID:  "tblvugnoJPS8GrpX"
+          # 通知专用应用 App ID 硬编码（非机密）；Secret 复用 FEISHU_APP_SECRET
+          # 因为 cli_aaf0ce1e9ef89d27 就是当前 FEISHU_APP_ID 对应的应用
+          FEISHU_NOTIFY_APP_ID:     "cli_aaf0ce1e9ef89d27"
+          FEISHU_NOTIFY_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          # 通知名单：Union ID（洪、王阳）
+          NOTIFY_USERS: "on_93da40c6314edbfa2dc3e031ef405389 on_b09bcbf3e74f5d423900aa9b2f00eb63"
+          # 群机器人 webhook（不用就留空）
+          FEISHU_WEBHOOK_URL: ""
+          FEISHU_WEBHOOK_SECRET: ""
           # 时区（确保日期范围、日志时间、导出月正确）
           TZ: "Asia/Shanghai"
 
