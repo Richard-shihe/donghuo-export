@@ -247,7 +247,7 @@ def make_excel_bytes(rows: list[dict]) -> bytes:
 
     wb = Workbook()
     ws = wb.active
-    ws.title = "Sheet1"
+    ws.title = "导入数据"
 
     header_font   = Font(bold=True, name="宋体", size=11)
     header1_font  = Font(bold=True, name="宋体", size=12, color="C00000")
@@ -448,10 +448,10 @@ def main() -> int:
                 price_total += float(p)
             mapped_rows.append(row)
 
-        # 文件名：欧冶模板_挂-士禾_YYMMDD_HHMMSS.xlsx（时间戳防重复）
-        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        # 文件名：挂-士禾_YYMMDD_HHMMSS.xlsx
+        ts = datetime.datetime.now().strftime("%y%m%d_%H%M%S")
         safe_name = view_display.replace("/", "-").replace("\\", "-")
-        filename = f"欧冶模板_{safe_name}_{ts}.xlsx"
+        filename = f"{safe_name}_{ts}.xlsx"
 
         xlsx_bytes = make_excel_bytes(mapped_rows)
         # 空值最多的前 8 列（用于汇报）
