@@ -277,20 +277,24 @@ def donghuo_query_orders(session, limit: int = 0) -> list:
     return all_rows
 
 
-def donghuo_query_items(session, c_danhao: str) -> list:
-    """查某订单的明细列表（含空循环保护）"""
+def donghuo_query_items_all(session, page_size: int = 500,
+                            max_pages: int = 50) -> list:
+    """全量拉取所有采购明细（不传 sc_danhao，分页拉完整个"订单明细汇总"）。
+
+    相比逐订单查明细，请求次数从 N(订单数) 降到 ceil(总数/page_size)，
+    2500+ 明细只需 3~5 页即可拉完。
+    """
     all_rows = []
     page = 1
     empty_streak = 0
-    MAX_PAGES = 50
-    while page <= MAX_PAGES:
+    while page <= max_pages:
         r = session.post(API_ITEM_LIST,
-                         data={"page": page, "limit": 100,
-                               "sc_danhao": c_danhao},
-                         headers=AJAX_HEADERS, timeout=15)
+                         data={"page": page, "limit": page_size},
+                         headers=AJAX_HEADERS, timeout=30)
         try:
             d = r.json()
-        except Exception:
+        except Exception as exc:
+            print(f"  ⚠️  明细列表第 {page} 页解析失败: {exc}，中断", flush=True)
             break
         rows = d.get("root") or []
         if not rows:
@@ -300,8 +304,18 @@ def donghuo_query_items(session, c_danhao: str) -> list:
         else:
             empty_streak = 0
         all_rows.extend(rows)
+        # 首页打印服务端返回的总条数/总页数（如有）
+        if page == 1:
+            total_count = d.get("rtotal")
+            total_pages = d.get("pgtotal")
+            print(f"  明细接口返回: rtotal={total_count} pgtotal={total_pages}"
+                  f" (本页 {len(rows)} 条)", flush=True)
+        print(f"  [明细 第 {page} 页] 本页 {len(rows)} 条，累计 {len(all_rows)} 条",
+              flush=True)
+        if not rows:
+            break
         page += 1
-        time.sleep(0.2)
+        time.sleep(0.3)
     return all_rows
 
 
@@ -392,12 +406,12 @@ def main():
     t0 = time.time()
 
     # 1. 飞书 token
-    print("\n[步骤 1/5] 获取飞书 token...", flush=True)
+    print("\n[步骤 1/4] 获取飞书 token...", flush=True)
     tok = feishu_token()
     print("  ✅ 飞书 token OK", flush=True)
 
     # 2. 读飞书表已有的明细ID（去重用）
-    print("\n[步骤 2/5] 读飞书表已有记录（去重用）...", flush=True)
+    print("\n[步骤 2/4] 读飞书表已有记录（去重用）...", flush=True)
     existing_rows = bitable_read_all(tok, app_token, table_id)
     existing_item_ids = set()
     for r in existing_rows:
@@ -408,39 +422,27 @@ def main():
           flush=True)
 
     # 3. 登录懂火
-    print("\n[步骤 3/5] 登录懂火...", flush=True)
+    print("\n[步骤 3/4] 登录懂火...", flush=True)
     session = login_donghuo()
     if session is None:
         print("登录失败", flush=True)
         return 1
 
-    # 4. 拉采购订单列表
-    print("\n[步骤 4/5] 拉采购订单列表...", flush=True)
-    orders = donghuo_query_orders(session, limit=args.limit)
-    print(f"  共 {len(orders)} 个订单", flush=True)
+    # 4. 全量拉采购明细 + 过滤 C2026- 开头
+    print("\n[步骤 4/4] 全量拉采购明细（mxlist 不传 sc_danhao）...", flush=True)
+    all_items_raw = donghuo_query_items_all(session)
+    print(f"  明细接口共返回 {len(all_items_raw)} 条", flush=True)
 
-    # 只保留 "C2026-" 开头的订单号
     ORDER_PREFIX = "C2026-"
-    total_before = len(orders)
-    orders = [o for o in orders
-              if str(o.get("订单号") or "").strip().startswith(ORDER_PREFIX)]
-    print(f"  过滤 '{ORDER_PREFIX}' 开头: {total_before} → {len(orders)} 个订单",
+    total_before = len(all_items_raw)
+    all_items = [it for it in all_items_raw
+                 if str(it.get("订单号") or "").strip().startswith(ORDER_PREFIX)]
+    print(f"  过滤 '{ORDER_PREFIX}' 开头: {total_before} → {len(all_items)} 条明细",
           flush=True)
 
-    # 5. 遍历订单查明细
-    print("\n[步骤 5/5] 遍历订单拉明细...", flush=True)
-    all_items = []
-    for idx, order in enumerate(orders, 1):
-        c_danhao = str(order.get("订单号") or "").strip()
-        if not c_danhao:
-            continue
-        items = donghuo_query_items(session, c_danhao)
-        all_items.extend(items)
-        if idx % 50 == 0 or idx == len(orders):
-            print(f"  [{idx}/{len(orders)}] 累计明细 {len(all_items)} 条", flush=True)
-        time.sleep(0.1)
+    session.close()
 
-    print(f"\n  总明细: {len(all_items)} 条", flush=True)
+    print(f"\n  待处理明细: {len(all_items)} 条", flush=True)
 
     # 6. 过滤 + 去重
     to_write = []
@@ -500,7 +502,7 @@ def main():
     new_count = len(records) if not dry_run else 0
     msg = (
         f"【懂火→飞书 采购订单导入】{'DRY-RUN ' if dry_run else ''}{now_shanghai_str()}\n"
-        f"订单: {len(orders)}  明细: {len(all_items)}\n"
+        f"明细总数: {len(all_items_raw)}  C2026-过滤后: {len(all_items)}\n"
         f"去重跳过: {skipped_dedup}  已入库跳过: {skipped_ruku}\n"
         f"新写入: {new_count if not dry_run else len(records)}(预览)\n"
         f"耗时: {elapsed:.1f}s"
