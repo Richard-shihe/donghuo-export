@@ -45,14 +45,17 @@ jobs:
 
       - name: 运行 export_caigou_to_bitable.py
         env:
-          DH_USERNAME: ${{ secrets.DH_USERNAME }}
-          DH_PASSWORD: ${{ secrets.DH_PASSWORD }}
+          # 注：DH1_xxx 是旧账号，已在 GitHub Actions 上建立境外 IP 信任
+          #     DH_xxx 是新账号，本地可用但 GitHub Actions 上被风控
+          DH_USERNAME: ${{ secrets.DH1_USERNAME }}
+          DH_PASSWORD: ${{ secrets.DH1_PASSWORD }}
           FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
           FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
           FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
           FEISHU_WEBHOOK_SECRET: ${{ secrets.FEISHU_WEBHOOK_SECRET }}
           BITABLE_APP_TOKEN: ${{ vars.BITABLE_APP_TOKEN || 'OSuobf2ZkaWtUAsXEE9c3aBTnwh' }}
           BITABLE_TABLE_ID: ${{ vars.BITABLE_TABLE_ID || 'tblrhqzHuTsAprU3' }}
+          PYTHONUNBUFFERED: "1"
           TZ: "Asia/Shanghai"
         run: |
           ARGS=""
@@ -69,6 +72,9 @@ jobs:
             ARGS="$ARGS --skip-ruku-done"
           fi
           echo "最终参数: $ARGS"
+          echo "[诊断] Python 版本:"
+          python --version
+          echo "[诊断] 开始运行脚本..."
           python export_caigou_to_bitable.py $ARGS
           EXIT_CODE=$?
           echo "脚本退出码: $EXIT_CODE"

@@ -41,6 +41,35 @@ BASE_URL = "https://erpa.donghuo.vip"
 LOGIN_URL = f"{BASE_URL}/controller/admin/c_longin/index"
 CAPTCHA_URL = f"{BASE_URL}/common/captcha"
 
+# ddddocr 单例（懒加载，避免 import 模块时就加载 ONNX 大模型）
+# 单例化后每次识别复用同一个实例，避免反复加载模型导致超时
+_ocr_instance = None
+_ocr_init_error = None
+
+
+def _get_ocr():
+    """获取 ddddocr 单例，首次调用时初始化模型（只需加载一次）"""
+    global _ocr_instance, _ocr_init_error
+    if _ocr_instance is not None:
+        return _ocr_instance
+    if _ocr_init_error is not None:
+        # 上次初始化失败过，直接返回 None 避免再次尝试
+        return None
+    try:
+        import ddddocr  # type: ignore
+        print("[ddddocr] 首次加载 ONNX 模型（仅一次，后续复用）...", flush=True)
+        _ocr_instance = ddddocr.DdddOcr(show_ad=False)
+        print("[ddddocr] 模型加载完成", flush=True)
+        return _ocr_instance
+    except ImportError:
+        _ocr_init_error = "ImportError"
+        print("[警告] 未安装 ddddocr，无法识别验证码", flush=True)
+        return None
+    except Exception as exc:
+        _ocr_init_error = str(exc)
+        print(f"[错误] ddddocr 初始化失败: {exc}", flush=True)
+        return None
+
 
 def create_session() -> requests.Session:
     """创建带重试机制的 requests Session"""
@@ -62,16 +91,14 @@ def create_session() -> requests.Session:
 
 
 def recognize_captcha(image_bytes: bytes) -> str:
-    """用 ddddocr 识别图形验证码，失败返回空串"""
-    try:
-        import ddddocr  # type: ignore
-        ocr = ddddocr.DdddOcr(show_ad=False)
-        return ocr.classification(image_bytes).strip().replace(" ", "")
-    except ImportError:
-        print("[警告] 未安装 ddddocr，无法识别验证码")
+    """用 ddddocr 识别图形验证码（复用单例 OCR 实例），失败返回空串"""
+    ocr = _get_ocr()
+    if ocr is None:
         return ""
+    try:
+        return ocr.classification(image_bytes).strip().replace(" ", "")
     except Exception as exc:
-        print(f"[错误] 验证码识别异常: {exc}")
+        print(f"[错误] 验证码识别异常: {exc}", flush=True)
         return ""
 
 
@@ -86,12 +113,12 @@ def login(session: requests.Session,
     成功返回 True，否则 False。
     """
     for attempt in range(1, max_attempts + 1):
-        print(f"[登录] 尝试 {attempt}/{max_attempts} ...")
+        print(f"[登录] 尝试 {attempt}/{max_attempts} ...", flush=True)
 
         # 1) 拉取验证码图片（同时建立/刷新 Session Cookie）
         img_resp = session.get(CAPTCHA_URL, timeout=15)
         if img_resp.status_code != 200:
-            print(f"  获取验证码失败: HTTP {img_resp.status_code}")
+            print(f"  获取验证码失败: HTTP {img_resp.status_code}", flush=True)
             time.sleep(2)
             continue
 
@@ -99,7 +126,7 @@ def login(session: requests.Session,
         captcha_code = recognize_captcha(img_resp.content)
         if not captcha_code:
             captcha_code = "1234"  # 占位，必然失败，但可触发刷新
-        print(f"  识别结果: {captcha_code}")
+        print(f"  识别结果: {captcha_code}", flush=True)
 
         # 3) 提交登录
         resp = session.post(LOGIN_URL,
@@ -111,16 +138,16 @@ def login(session: requests.Session,
         try:
             result = json.loads(text)
             if isinstance(result, dict) and str(result.get("code")) == "200":
-                print("[登录] 成功")
+                print("[登录] 成功", flush=True)
                 return True
             msg = result.get("msg") or result.get("message") or text[:100]
-            print(f"  失败: {msg}")
+            print(f"  失败: {msg}", flush=True)
         except json.JSONDecodeError:
-            print(f"  非JSON响应(前200): {text[:200]}")
+            print(f"  非JSON响应(前200): {text[:200]}", flush=True)
 
         time.sleep(2)
 
-    print(f"[登录] 已达最大尝试次数 {max_attempts}，登录失败")
+    print(f"[登录] 已达最大尝试次数 {max_attempts}，登录失败", flush=True)
     return False
 
 
@@ -143,7 +170,7 @@ def login_donghuo(username: str | None = None,
     password = (password or os.environ.get("DH_PASSWORD", "")).strip()
     if not username or not password:
         print("[错误] 缺少账号/密码：请传入 username/password，"
-              "或设置环境变量 DH_USERNAME / DH_PASSWORD")
+              "或设置环境变量 DH_USERNAME / DH_PASSWORD", flush=True)
         return None
 
     session = create_session()

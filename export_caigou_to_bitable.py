@@ -149,7 +149,8 @@ def feishu_token() -> str:
 def bitable_read_all(tok, app_token, table_id) -> list:
     rows = []
     page_token = ""
-    for _ in range(200):
+    empty_streak = 0  # 连续空页计数（防止 has_more=true 但 items=[] 死循环）
+    for page_idx in range(200):
         url = f"{FEISHU_OPEN_BASE}/bitable/v1/apps/{app_token}/tables/{table_id}/records"
         params = {"page_size": 500}
         if page_token:
@@ -158,16 +159,31 @@ def bitable_read_all(tok, app_token, table_id) -> list:
                          headers={"Authorization": f"Bearer {tok}"},
                          timeout=30, proxies=NO_PROXY)
         d = r.json()
+        if d.get("code") != 0:
+            print(f"  ⚠️  飞书表查询返回错误 code={d.get('code')} msg={d.get('msg')}")
+            break
         items = (d.get("data") or {}).get("items") or []
+        if not items:
+            empty_streak += 1
+            if empty_streak >= 3:
+                print(f"  ⚠️  连续 {empty_streak} 页返回空 items，强制中断分页"
+                      f"（has_more={((d.get('data') or {}).get('has_more'))}）")
+                break
+        else:
+            empty_streak = 0
         for it in items:
             rec = {"_record_id": it.get("record_id", "")}
             for k, v in (it.get("fields") or {}).items():
                 rec[k] = _flatten(v)
             rows.append(rec)
         d_data = d.get("data") or {}
+        if page_idx % 5 == 0 or not items:
+            print(f"  [分页 {page_idx}] 本页 {len(items)} 条，累计 {len(rows)} 条，"
+                  f"has_more={d_data.get('has_more')}")
         if not d_data.get("has_more") or not d_data.get("page_token"):
             break
         page_token = d_data["page_token"]
+        time.sleep(0.2)
     return rows
 
 
@@ -177,7 +193,8 @@ def bitable_batch_create(tok, app_token, table_id, records: list,
     ok = 0
     fail = 0
     errors = []
-    for i in range(0, len(records), batch_size):
+    total_batches = (len(records) + batch_size - 1) // batch_size
+    for batch_idx, i in enumerate(range(0, len(records), batch_size), 1):
         batch = records[i:i + batch_size]
         url = (f"{FEISHU_OPEN_BASE}/bitable/v1/apps/{app_token}"
                f"/tables/{table_id}/records/batch_create")
@@ -190,6 +207,9 @@ def bitable_batch_create(tok, app_token, table_id, records: list,
         else:
             fail += len(batch)
             errors.append(f"batch {i}: code={d.get('code')} msg={d.get('msg')}")
+        if batch_idx % 5 == 0 or batch_idx == total_batches or fail:
+            print(f"    [写入批次 {batch_idx}/{total_batches}]"
+                  f" 成功 {ok} / 失败 {fail}", flush=True)
         time.sleep(0.5)
     return {"ok": ok, "fail": fail, "errors": errors}
 
@@ -223,34 +243,47 @@ def _feishu_sign(secret, timestamp):
 # 懂火
 # ============================================================
 def donghuo_query_orders(session, limit: int = 0) -> list:
-    """拉采购订单列表，返回订单号列表"""
+    """拉采购订单列表，返回订单号列表（含空循环保护 + 进度日志）"""
     all_rows = []
     page = 1
-    while True:
+    empty_streak = 0
+    MAX_PAGES = 500  # 绝对上限，防止死循环
+    while page <= MAX_PAGES:
         r = session.post(API_ORDER_LIST,
                          data={"page": page, "limit": 100},
                          headers=AJAX_HEADERS, timeout=15)
         try:
             d = r.json()
-        except Exception:
+        except Exception as exc:
+            print(f"  ⚠️  订单列表第 {page} 页解析失败: {exc}，中断", flush=True)
             break
         rows = d.get("root") or []
         if not rows:
-            break
+            empty_streak += 1
+            if empty_streak >= 3:
+                print(f"  ⚠️  订单列表连续 {empty_streak} 页为空，中断", flush=True)
+                break
+        else:
+            empty_streak = 0
         all_rows.extend(rows)
         if limit and len(all_rows) >= limit:
             all_rows = all_rows[:limit]
             break
+        if page % 10 == 0 or not rows:
+            print(f"  [订单列表 第 {page} 页] 本页 {len(rows)} 条，累计 {len(all_rows)} 条",
+                  flush=True)
         page += 1
         time.sleep(0.2)
     return all_rows
 
 
 def donghuo_query_items(session, c_danhao: str) -> list:
-    """查某订单的明细列表"""
+    """查某订单的明细列表（含空循环保护）"""
     all_rows = []
     page = 1
-    while True:
+    empty_streak = 0
+    MAX_PAGES = 50
+    while page <= MAX_PAGES:
         r = session.post(API_ITEM_LIST,
                          data={"page": page, "limit": 100,
                                "sc_danhao": c_danhao},
@@ -261,7 +294,11 @@ def donghuo_query_items(session, c_danhao: str) -> list:
             break
         rows = d.get("root") or []
         if not rows:
-            break
+            empty_streak += 1
+            if empty_streak >= 2:
+                break
+        else:
+            empty_streak = 0
         all_rows.extend(rows)
         page += 1
         time.sleep(0.2)
@@ -346,43 +383,52 @@ def main():
     app_token = env("BITABLE_APP_TOKEN", BITABLE_APP_TOKEN_DEFAULT)
     table_id = env("BITABLE_TABLE_ID", BITABLE_TABLE_ID_DEFAULT)
 
-    print(f"====== 懂火采购订单 → 飞书多维表 ======")
-    print(f"  模式: {'DRY-RUN' if dry_run else '实际执行'}")
-    print(f"  limit: {args.limit if args.limit else '全部'}")
-    print(f"  跳过已入库: {args.skip_ruku_done}")
-    print(f"  飞书表: {app_token} / {table_id}")
+    print(f"====== 懂火采购订单 → 飞书多维表 ======", flush=True)
+    print(f"  模式: {'DRY-RUN' if dry_run else '实际执行'}", flush=True)
+    print(f"  limit: {args.limit if args.limit else '全部'}", flush=True)
+    print(f"  跳过已入库: {args.skip_ruku_done}", flush=True)
+    print(f"  飞书表: {app_token} / {table_id}", flush=True)
 
     t0 = time.time()
 
     # 1. 飞书 token
-    print("\n[步骤] 获取飞书 token...")
+    print("\n[步骤 1/5] 获取飞书 token...", flush=True)
     tok = feishu_token()
-    print("  ✅ 飞书 token OK")
+    print("  ✅ 飞书 token OK", flush=True)
 
     # 2. 读飞书表已有的明细ID（去重用）
-    print("\n[步骤] 读飞书表已有记录（去重用）...")
+    print("\n[步骤 2/5] 读飞书表已有记录（去重用）...", flush=True)
     existing_rows = bitable_read_all(tok, app_token, table_id)
     existing_item_ids = set()
     for r in existing_rows:
         iid = str(r.get("采购明细ID") or "").strip()
         if iid:
             existing_item_ids.add(iid)
-    print(f"  飞书表已有 {len(existing_rows)} 条，其中 {len(existing_item_ids)} 条有明细ID")
+    print(f"  飞书表已有 {len(existing_rows)} 条，其中 {len(existing_item_ids)} 条有明细ID",
+          flush=True)
 
     # 3. 登录懂火
-    print("\n[步骤] 登录懂火...")
+    print("\n[步骤 3/5] 登录懂火...", flush=True)
     session = login_donghuo()
     if session is None:
-        print("登录失败")
+        print("登录失败", flush=True)
         return 1
 
     # 4. 拉采购订单列表
-    print("\n[步骤] 拉采购订单列表...")
+    print("\n[步骤 4/5] 拉采购订单列表...", flush=True)
     orders = donghuo_query_orders(session, limit=args.limit)
-    print(f"  共 {len(orders)} 个订单")
+    print(f"  共 {len(orders)} 个订单", flush=True)
+
+    # 只保留 "C2026-" 开头的订单号
+    ORDER_PREFIX = "C2026-"
+    total_before = len(orders)
+    orders = [o for o in orders
+              if str(o.get("订单号") or "").strip().startswith(ORDER_PREFIX)]
+    print(f"  过滤 '{ORDER_PREFIX}' 开头: {total_before} → {len(orders)} 个订单",
+          flush=True)
 
     # 5. 遍历订单查明细
-    print("\n[步骤] 遍历订单拉明细...")
+    print("\n[步骤 5/5] 遍历订单拉明细...", flush=True)
     all_items = []
     for idx, order in enumerate(orders, 1):
         c_danhao = str(order.get("订单号") or "").strip()
@@ -391,10 +437,10 @@ def main():
         items = donghuo_query_items(session, c_danhao)
         all_items.extend(items)
         if idx % 50 == 0 or idx == len(orders):
-            print(f"  [{idx}/{len(orders)}] 累计明细 {len(all_items)} 条")
+            print(f"  [{idx}/{len(orders)}] 累计明细 {len(all_items)} 条", flush=True)
         time.sleep(0.1)
 
-    print(f"\n  总明细: {len(all_items)} 条")
+    print(f"\n  总明细: {len(all_items)} 条", flush=True)
 
     # 6. 过滤 + 去重
     to_write = []
@@ -418,9 +464,9 @@ def main():
 
         to_write.append(item)
 
-    print(f"\n  去重跳过: {skipped_dedup}")
-    print(f"  已入库跳过: {skipped_ruku}")
-    print(f"  待写入: {len(to_write)} 条")
+    print(f"\n  去重跳过: {skipped_dedup}", flush=True)
+    print(f"  已入库跳过: {skipped_ruku}", flush=True)
+    print(f"  待写入: {len(to_write)} 条", flush=True)
 
     session.close()
 
@@ -432,22 +478,22 @@ def main():
 
     # 8. 写入飞书表
     if dry_run:
-        print(f"\n[DRY-RUN] 跳过写入，预览前 3 条:")
+        print(f"\n[DRY-RUN] 跳过写入，预览前 3 条:", flush=True)
         for i, rec in enumerate(records[:3], 1):
-            print(f"\n  --- 第 {i} 条 ---")
+            print(f"\n  --- 第 {i} 条 ---", flush=True)
             for k, v in rec["fields"].items():
-                print(f"    {k}: {v}")
+                print(f"    {k}: {v}", flush=True)
     else:
         if records:
-            print(f"\n[步骤] 写入飞书表 ({len(records)} 条)...")
+            print(f"\n[步骤] 写入飞书表 ({len(records)} 条)...", flush=True)
             result = bitable_batch_create(tok, app_token, table_id, records)
-            print(f"  ✅ 成功 {result['ok']} 条")
+            print(f"  ✅ 成功 {result['ok']} 条", flush=True)
             if result["fail"]:
-                print(f"  ❌ 失败 {result['fail']} 条")
+                print(f"  ❌ 失败 {result['fail']} 条", flush=True)
                 for e in result["errors"][:3]:
-                    print(f"    {e}")
+                    print(f"    {e}", flush=True)
         else:
-            print("\n  无新记录需要写入")
+            print("\n  无新记录需要写入", flush=True)
 
     # 9. 汇总 + 通知
     elapsed = time.time() - t0
@@ -459,9 +505,9 @@ def main():
         f"新写入: {new_count if not dry_run else len(records)}(预览)\n"
         f"耗时: {elapsed:.1f}s"
     )
-    print(f"\n{'='*60}")
-    print(msg)
-    print(f"{'='*60}")
+    print(f"\n{'='*60}", flush=True)
+    print(msg, flush=True)
+    print(f"{'='*60}", flush=True)
     feishu_notify(msg)
     return 0
 
