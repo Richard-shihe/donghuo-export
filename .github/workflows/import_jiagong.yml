@@ -1,4 +1,4 @@
-name: 飞书加工成品 → 懂火（批量写入）
+name: 飞书加工成品 → 懂火（批量写入）（import_jiagong）
 
 on:
   workflow_dispatch:
@@ -38,7 +38,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: 运行 import_finished.py
+      - name: 运行 import_jiagong.py
         env:
           DH_USERNAME: ${{ secrets.DH_USERNAME }}
           DH_PASSWORD: ${{ secrets.DH_PASSWORD }}
@@ -60,7 +60,7 @@ jobs:
             export IMPORT_LIMIT="${{ inputs.limit }}"
           fi
           echo "最终参数: $ARGS  IMPORT_LIMIT=${IMPORT_LIMIT}"
-          python import_finished.py $ARGS
+          python import_jiagong.py $ARGS
           EXIT_CODE=$?
           echo "脚本退出码: $EXIT_CODE"
           exit $EXIT_CODE

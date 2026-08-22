@@ -1,17 +1,31 @@
 name: 准发——下载 → 云盘 → 进度
+# （保留旧名兼容 cron-job.org / 旧触发器）
+# 实际职责：IEC 货物管理 → 出厂码单 → 码单捆包下载 → 上传飞书云盘
+#           文件夹：DfQdfSxl2ld25wdx6Rxcub9hnDf
+#           文件名：码单_YYMMDD_HHMMSS.xlsx
+# 文档见：export_iec_weightmemo_bundle.py 顶部 docstring
 
-# 触发方式：
-# 可在 Actions 页面手动点击 "Run workflow" 立即触发
-# 步骤顺序：①准发→下载→导出 xlsx  ②上传飞书云盘  ③用同一份 xlsx 更新"进度"表（准发量/出厂量）
 on:
   workflow_dispatch:
     inputs:
       reason:
         description: "手动触发说明（可选）"
         required: false
-        default: "手动立即准发下载 + 更新进度表"
+        default: "手动立即：IEC 出厂码单 → 码单捆包下载 → 飞书云盘 DfQdfSxl2"
+      days:
+        description: "出厂日期近 N 天（含今日，默认 30）。被 date_start/end 覆盖。"
+        required: false
+        default: "30"
+      date_start:
+        description: "出厂日期起 YYYYMMDD（留空用 --days 算）"
+        required: false
+        default: ""
+      date_end:
+        description: "出厂日期止 YYYYMMDD（留空=今天）"
+        required: false
+        default: ""
       dry_run:
-        description: "写入进度表时仅预览匹配（true） 还是 实际写入（false）"
+        description: "只下载不上传（true） 还是 下载+上传飞书（false）"
         required: false
         default: "false"
         type: choice
@@ -19,16 +33,16 @@ on:
           - "false"
           - "true"
 
-# 并发控制：同一时刻只跑一个实例
+# 并发控制：同一时刻只跑一个实例，避免 IEC 同时触发多次 exportExcel 排队
 concurrency:
   group: quasi-hair-export
   cancel-in-progress: false
 
 jobs:
-  export-upload-update:
-    name: ①准发下载 ②上传云盘 ③写入进度表
+  export-upload:
+    name: ①IEC 出厂码单·码单捆包下载 ②上传飞书云盘 DfQdfSxl2
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
 
     steps:
       - name: 检出代码
@@ -44,23 +58,37 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: ①② 运行准发下载脚本 → 自动上传飞书云盘（同一份 xlsx 留给下一步写入）
+      - name: ①② 出厂码单·码单捆包下载 → 自动上传飞书云盘
         env:
-          # ===== 宝钢 IEC 系统账号（在仓库 Secrets 中配置） =====
+          # ===== 宝钢 IEC 系统账号（仓库 Secrets 中配置） =====
           IBAO_USERNAME: ${{ secrets.IBAO_USERNAME }}
           IBAO_PASSWORD: ${{ secrets.IBAO_PASSWORD }}
 
-          # ===== 飞书云盘（默认文件夹 QIvpfoJnqlg8IIdT1PXctnB3nne 已在脚本硬编码） =====
+          # ===== 飞书自建应用（仓库 Secrets 中配置，需 drive:drive 权限 + 文件夹可编辑协作者） =====
           FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
           FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
-          # 如需上传到其它文件夹，在这里覆盖；留空则用默认
-          FEISHU_FOLDER_TOKEN: ${{ vars.QUASI_FOLDER_TOKEN || '' }}
+
+          # 飞书私信通知专用应用（可选；留空则用默认 FEISHU_APP_SECRET 回退）
+          FEISHU_NOTIFY_APP_SECRET: ${{ secrets.FEISHU_NOTIFY_APP_SECRET }}
+
+          # ===== 飞书云盘目标文件夹（用户指定 URL 中提取：DfQdfSxl2ld25wdx6Rxcub9hnDf）=====
+          #   可在 vars 里覆盖 QUASI_FOLDER_TOKEN，或直接改下方默认值
+          FEISHU_FOLDER_TOKEN: ${{ vars.QUASI_FOLDER_TOKEN || 'DfQdfSxl2ld25wdx6Rxcub9hnDf' }}
+
+          # 飞书私信通知：Union ID 列表（逗号分隔），不传则脚本内置默认 2 人
+          FEISHU_UNION_IDS: ${{ secrets.FEISHU_UNION_IDS || '' }}
 
           # 时区（确保文件名时间、日期范围正确）
           TZ: "Asia/Shanghai"
+
+          DRY_RUN_FLAG: ${{ inputs.dry_run }}
+          DAYS_FLAG: ${{ inputs.days }}
+          DATE_START_FLAG: ${{ inputs.date_start }}
+          DATE_END_FLAG: ${{ inputs.date_end }}
+          REASON_FLAG: ${{ inputs.reason }}
         run: |
           set -e
-          # 检查必填 Secrets
+          # 1. 必填 Secrets 检查
           if [ -z "$IBAO_USERNAME" ] || [ -z "$IBAO_PASSWORD" ]; then
             echo "::error:: 缺少 IBAO_USERNAME / IBAO_PASSWORD Secrets，请在仓库 Settings → Secrets 中配置"
             exit 1
@@ -70,44 +98,48 @@ jobs:
             exit 1
           fi
           echo "=== Secrets 检查通过 ==="
-          echo "IBAO_USERNAME: ${IBAO_USERNAME:0:3}***"
-          echo "FEISHU_APP_ID: ${FEISHU_APP_ID:0:7}***"
+          echo "IBAO_USERNAME : ${IBAO_USERNAME:0:3}***"
+          echo "FEISHU_APP_ID : ${FEISHU_APP_ID:0:7}***"
+          echo "FEISHU_FOLDER : ${FEISHU_FOLDER_TOKEN}"
+          [ -n "$REASON_FLAG" ] && echo "触发说明: ${REASON_FLAG}"
 
-          # 运行下载脚本
-          python download_bundle.py
-
-          # 确认 xlsx 已生成
-          echo "=== 检查生成的 xlsx 文件 ==="
-          ls -la 准发下载_*.xlsx || {
-            echo "::error:: download_bundle.py 执行完成但未生成 xlsx 文件，请检查上面的日志"
-            exit 1
-          }
-
-      - name: ③ 用刚下载的同一份 xlsx → 更新飞书"进度"表（准发量 / 出厂量）
-        env:
-          # ===== 飞书自建应用（在仓库 Secrets 中配置） =====
-          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
-          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
-
-          # ===== 多维表格（默认 app_token Tz0XbQVzkaZuJasBwb8cRjkfnoe 已在脚本硬编码） =====
-          BITABLE_APP_TOKEN: ${{ vars.PROGRESS_BITABLE_TOKEN || '' }}
-
-          TZ: "Asia/Shanghai"
-          DRY_RUN_FLAG: ${{ inputs.dry_run }}
-        run: |
-          set -e
-          # 确认 xlsx 存在（虽然 step 1 已检查，这里再保险一次）
-          ls 准发下载_*.xlsx || {
-            echo "::error:: 上一步未生成 xlsx 文件，无法更新进度表"
-            exit 1
-          }
+          # 2. 组装命令行参数
+          CMD="python export_iec_weightmemo_bundle.py"
           if [ "$DRY_RUN_FLAG" = "true" ]; then
-            python update_progress_delivery.py --dry-run
-          else
-            python update_progress_delivery.py
+            CMD="$CMD --dry-run"
+          fi
+          if [ -n "$DATE_START_FLAG" ]; then
+            CMD="$CMD --date-start $DATE_START_FLAG"
+          fi
+          if [ -n "$DATE_END_FLAG" ]; then
+            CMD="$CMD --date-end $DATE_END_FLAG"
+          fi
+          if [ -z "$DATE_START_FLAG" ] && [ -z "$DATE_END_FLAG" ] && [ -n "$DAYS_FLAG" ]; then
+            CMD="$CMD --days $DAYS_FLAG"
+          fi
+          # 飞书私信（Union ID 列表注入环境变量）
+          if [ -n "$FEISHU_UNION_IDS" ]; then
+            export NOTIFY_USERS="$FEISHU_UNION_IDS"
+            echo "NOTIFY_USERS: (共 $(echo "$FEISHU_UNION_IDS" | awk -F',' '{print NF}') 个 Union ID)"
           fi
 
-      - name: 失败时告警
+          echo ""
+          echo "=== 运行命令 ==="
+          echo "$CMD"
+          echo ""
+          $CMD
+
+          # 3. 确认文件已生成
+          echo ""
+          echo "=== 检查生成的 码单_*.xlsx 文件 ==="
+          ls -la 码单_*.xlsx || {
+            echo "::error:: 脚本执行完成但未生成 码单_YYMMDD_HHMMSS.xlsx 文件，请检查上方日志"
+            exit 1
+          }
+
+      - name: 失败时告警（供 cron-job.org 外部查看 Actions 结果）
         if: failure()
         run: |
-          echo "::warning:: 流程失败：请检查 Secrets/IEC 登录状态/飞书多维表字段权限（准发量/出厂量可写）"
+          echo "::warning:: 流程失败，请检查：Secrets 是否齐全 / IEC 账号密码是否仍可用 / "
+          echo "::warning::   飞书自建应用 cli_aaf0ce1e9ef89d27 是否已在文件夹 DfQdfSxl2ld25wdx6Rxcub9hnDf 中添加为「可编辑」协作者"
+          echo "::warning::   私信 Union ID 列表是否正确（FEISHU_UNION_IDS 以逗号分隔，无需空格）"

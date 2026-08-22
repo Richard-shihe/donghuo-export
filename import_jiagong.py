@@ -6,12 +6,12 @@
 
 运行方式:
   # 预览模式（DRY-RUN），只打印计划，不实际修改
-  python import_finished.py --dry-run
+  python import_jiagong.py --dry-run
 
   # 实际执行
-  python import_finished.py
+  python import_jiagong.py
 
-依赖环境变量（默认值和 import_jiagong 一样）:
+依赖环境变量:
   FEISHU_APP_ID / FEISHU_APP_SECRET
   BITABLE_APP_TOKEN             (多维表 app_token)
   BITABLE_HEADER_TABLE_ID       (加工单表头 表ID, 可默认自动查找)
