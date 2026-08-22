@@ -366,6 +366,7 @@ def validate_header_options(merged_header: dict, ajax_options: dict, static_opti
         ("服务商名称", "jsdanwei", False),
         ("税率", "shuilv", False),
         ("所属公司", "fcompany", True),
+        ("添加人", "funame", True),
     ]
     for label, sel_id, allow_empty in checks:
         val = (merged_header.get(sel_id) or "").strip()
@@ -432,6 +433,7 @@ def process_one_danhao(session, tok, app_token,
         "税率": "shuilv",
         "金额": "jiner",
         "所属公司": "fcompany",
+        "添加人": "funame",
     }
     for col, key in header_map.items():
         v = header_info.get(col)
@@ -534,7 +536,7 @@ def process_one_danhao(session, tok, app_token,
     }
 
     print(f"    新表头: fyname='{update_data['fyname']}' jsdanwei='{update_data['jsdanwei']}' "
-          f"shuilv={update_data['shuilv']} jiner={update_data['jiner']} fcompany='{update_data['fcompany']}'")
+          f"shuilv={update_data['shuilv']} jiner={update_data['jiner']} fcompany='{update_data['fcompany']}' funame='{update_data['funame']}'")
     print(f"    新增 {len(zid_tokens)} 条成品:")
     for i, kb in enumerate(kunbaohao_list):
         print(f"      [{i+1}] {kb:<20} {pinmin_list[i]:<6} {guige_list[i]:<22} "
