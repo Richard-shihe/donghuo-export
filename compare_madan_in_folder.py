@@ -10,7 +10,7 @@ IEC 码单云盘比对 → 增量 CSV（阶段2 前置：2a 下载 + 2b 比对�
 
 输入：
   飞书云盘文件夹（默认 DfQdfSxl2ld25wdx6Rxcub9hnDf，可 --folder-token 覆盖）
-  文件名规则：码单_YYMMDD_HHMMSS.xlsx （2 位年份 + 秒级时间戳，由 export_iec_bundle.py 产出）
+  文件名规则：码单_YYMMDD_HHMMSS.xlsx （2 位年份 + 秒级时间戳，由 export_iec_madan.py 产出）
 
 输出：
   CSV（默认 比对_最新多出记录.csv，可 --csv 覆盖）
@@ -163,7 +163,7 @@ def main():
 
     if len(files) < 2:
         print(f"\n❌ 需要至少 2 个码单文件来比对，当前只有 {len(files)} 个")
-        print("   请先运行 export_iec_bundle.py 至少两次（产生两次码单）")
+        print("   请先运行 export_iec_madan.py 至少两次（产生两次码单）")
         sys.exit(1)
 
     latest = files[0]

@@ -45,11 +45,11 @@ IEC —— 入库管理：出厂码单 → 码单捆包下载 → 飞书云盘
   DELIVERY_MODE                        目前仅 'feishu'，即上传云盘（默认）
 
 命令行：
-  python export_iec_bundle.py                     # 出厂日期近 5 天（含今日），自动上传
-  python export_iec_bundle.py --days 30          # 近 30 天
-  python export_iec_bundle.py --date-start 20260801 --date-end 20260821
-  python export_iec_bundle.py --dry-run          # 只下载不上传
-  python export_iec_bundle.py --no-upload        # 同上（等价 DRY_RUN=1）
+  python export_iec_madan.py                     # 出厂日期近 5 天（含今日），自动上传
+  python export_iec_madan.py --days 30          # 近 30 天
+  python export_iec_madan.py --date-start 20260801 --date-end 20260821
+  python export_iec_madan.py --dry-run          # 只下载不上传
+  python export_iec_madan.py --no-upload        # 同上（等价 DRY_RUN=1）
 """
 from __future__ import annotations
 

@@ -6,7 +6,7 @@ name: IEC 出厂码单 - 捆包下载 → 云盘 → Bitable 入库
 #   ② 上传飞书云盘文件夹 DfQdfSxl2ld25wdx6Rxcub9hnDf
 #   ③ 从云盘下载最新+次新 xlsx → pandas 比对"捆包号"→ 生成增量 CSV
 #   ④ CSV → 按字段映射表写入 Bitable（采购订单明细汇总 tblrhqzHuTsAprU3）
-# 文档见：export_iec_bundle.py / compare_madan_in_folder.py / iec_bundle-to-ruku.py 顶部 docstring
+# 文档见：export_iec_madan.py / compare_madan_in_folder.py / iec_bundle-to-ruku.py 顶部 docstring
 # 注：如使用 cron-job.org 外部触发，URL 指向本 yml 文件名 export_IEC_madan.yml
 
 on:
@@ -91,7 +91,7 @@ jobs:
           echo "FEISHU_APP_ID : ${FEISHU_APP_ID:0:7}***"
           echo "FEISHU_FOLDER : ${FEISHU_FOLDER_TOKEN:-DfQdfSxl2ld25wdx6Rxcub9hnDf (默认)}"
 
-          CMD="python export_iec_bundle.py"
+          CMD="python export_iec_madan.py"
           if [ "$DRY_RUN_FLAG" = "true" ]; then
             CMD="$CMD --dry-run"
           fi
