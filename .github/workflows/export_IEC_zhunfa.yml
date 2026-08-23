@@ -3,7 +3,7 @@ name: 准发——下载 → 云盘 → 进度
 # 实际职责：IEC 货物管理 → 出厂码单 → 码单捆包下载 → 上传飞书云盘
 #           文件夹：DfQdfSxl2ld25wdx6Rxcub9hnDf
 #           文件名：码单_YYMMDD_HHMMSS.xlsx
-# 文档见：export_iec_weightmemo_bundle.py 顶部 docstring
+# 文档见：export_iec_bundle.py 顶部 docstring
 
 on:
   workflow_dispatch:
@@ -104,7 +104,7 @@ jobs:
           [ -n "$REASON_FLAG" ] && echo "触发说明: ${REASON_FLAG}"
 
           # 2. 组装命令行参数
-          CMD="python export_iec_weightmemo_bundle.py"
+          CMD="python export_iec_bundle.py"
           if [ "$DRY_RUN_FLAG" = "true" ]; then
             CMD="$CMD --dry-run"
           fi
