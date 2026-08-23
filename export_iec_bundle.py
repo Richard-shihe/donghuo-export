@@ -185,6 +185,107 @@ def iec_login_and_enter() -> Tuple[IEC, requests.Session, str]:
     return iec, s, token
 
 
+# 查询列表 API（与页面点「查询/加载更多」用的接口相同）
+QUERY_LIST_API = f"{BASE}/iecs/freight/weightMemo/weightMemo/queryWeightMemoSellMoreThanOneOrder"
+# 列表 API 的 apiBean
+QUERY_LIST_API_BEAN = "com.baosight.iecs.freight.weightMemo.api.IWeightMemoService"
+QUERY_LIST_METHOD = "queryWeightMemoSellMoreThanOneOrder"
+
+
+def _query_memo_list(
+    *,
+    date_start: str,
+    date_end: str,
+    memo_code: str = "",
+    contract_num: str = "",
+    factory_order_num: str = "",
+    shopsign: str = "",
+    prod_code: str = "",
+    s: Optional[requests.Session] = None,
+    verbose: bool = True,
+) -> list:
+    """第一步：查询码单列表，获取所有记录的 ID 三元组。
+
+    对应页面点「查询」时的 queryWeightMemo() 逻辑。
+    用 putoutStackingBeginTime/EndTime（码单日期）筛选，今天的记录立即可见。
+    返回 [{stackingRecNum, factoryOrderNum, orderNum}, ...]
+
+    注意：列表 API 返回的是纯 HTML（text/html），不是 JSON。
+    每行有 3 个 hidden input：
+      <input name="stackingRecNum" type="hidden" value="F076040059">
+      <input name="factoryOrderNum" type="hidden" value="X6E0013470">
+      <input name="orderNum" type="hidden" value="QE267022440003">
+    """
+    if not s:
+        raise ValueError("必须传已建立的 session")
+
+    all_records = []
+    page = 1
+    page_size = 100  # 与页面一致
+
+    while True:
+        param = {
+            "putoutStackingRecNum": memo_code,
+            "contractNum": contract_num,
+            "factoryOrderNum": factory_order_num,
+            "prodCode": prod_code,
+            "prodCode1": "",
+            "shopsign": shopsign,
+            "putoutStackingBeginTime": date_start,
+            "putoutStackingEndTime": date_end,
+            "deliveryMonthStart": "",
+            "deliveryMonthEnd": "",
+            "settleUserNum": SETTLE_USER_NUM,
+            "pageDomain": {
+                "pageNum": page,
+                "pageSize": page_size,
+                "total": 0,
+            },
+        }
+        r = s.post(QUERY_LIST_API, data=json.dumps(param), timeout=60,
+                   headers={
+                       "Content-Type": "application/json; charset=utf-8",
+                       "Accept": "text/html, application/json, */*",
+                       "X-Requested-With": "XMLHttpRequest",
+                       "Referer": WEIGHTMEMO_PAGE,
+                   })
+        r.raise_for_status()
+        # ★ 注意：此 API 返回纯 HTML，不是 JSON
+        html_content = r.text
+
+        # 提取 hidden input 里的 stackingRecNum / factoryOrderNum / orderNum
+        # 格式：<input name="stackingRecNum" type="hidden" value="F076040059">
+        stacking_nums = re.findall(r'name="stackingRecNum"\s+type="hidden"\s+value="([^"]*)"', html_content)
+        factory_nums = re.findall(r'name="factoryOrderNum"\s+type="hidden"\s+value="([^"]*)"', html_content)
+        order_nums = re.findall(r'name="orderNum"\s+type="hidden"\s+value="([^"]*)"', html_content)
+
+        count = len(stacking_nums)
+        if count == 0:
+            break
+
+        for i in range(count):
+            all_records.append({
+                "stackingRecNum": stacking_nums[i] if i < len(stacking_nums) else "",
+                "factoryOrderNum": factory_nums[i] if i < len(factory_nums) else "",
+                "orderNum": order_nums[i] if i < len(order_nums) else "",
+            })
+
+        # 从 hidden input 读 total
+        total_match = re.search(r'<input[^>]*id="total"[^>]*value="(\d+)"', html_content)
+        total = int(total_match.group(1)) if total_match else 0
+        fetched = len(all_records)
+
+        if verbose:
+            print(f"    第 {page} 页: {count} 条, 累计 {fetched}/{total}")
+
+        if fetched >= total or count < page_size:
+            break
+
+        page += 1
+
+    return all_records
+
+
 def download_bundle(
     out_path: str,
     *,
@@ -202,15 +303,37 @@ def download_bundle(
     token: str = "",
     verbose: bool = True,
 ) -> Tuple[str, int]:
-    """调用 IEC queryALLMemoStackDownload 下载码单捆包 Excel。
+    """调用 IEC 码单捆包下载（两步法，与网页点击行为一致）。
+
+    第一步：查列表 API 获取记录 ID 三元组（用码单日期筛选，今天立即可见）
+    第二步：把 ID 列表作为 memoList 传给 exportExcel 下载
 
     返回 (abs_path, row_count)。row_count 在没装 pandas 时返回 -1。
     """
     if not s or not token:
         raise ValueError("必须传已建立的 session 与 token")
 
+    # ========== 第一步：查询列表 ==========
+    if verbose:
+        print(f"[Step 1] 查询码单列表  码单日期 {date_start}~{date_end}")
+    memo_list = _query_memo_list(
+        date_start=date_start,
+        date_end=date_end,
+        memo_code=memo_code,
+        contract_num=contract_num,
+        factory_order_num=factory_order_num,
+        shopsign=shopsign,
+        prod_code=prod_code,
+        s=s,
+        verbose=verbose,
+    )
+    if not memo_list:
+        raise RuntimeError(f"日期范围 {date_start}~{date_end} 内没有码单记录")
+    if verbose:
+        print(f"       找到 {len(memo_list)} 条记录")
+
+    # ========== 第二步：用 memoList 调用 exportExcel ==========
     param = {
-        # 表单筛选字段（selectForm.serializeObject 直接取）
         "putoutStackingRecNum": memo_code,
         "contractNum": contract_num,
         "factoryOrderNum": factory_order_num,
@@ -221,20 +344,14 @@ def download_bundle(
         "putoutStackingEndTime": date_end,
         "deliveryMonthStart": delivery_month_start,
         "deliveryMonthEnd": delivery_month_end,
-        # 下载按钮里额外赋值（保持一致避免后端差异）
-        "stackingRecNum": memo_code,
-        "putoutDateBeginTime": date_start,
-        "putoutDateEndTime": date_end,
-        "instockFlag": instock_flag,
-        "offset": 0,
-        "limit": 1000,
+        "memoList": memo_list,  # ★ 关键：选中记录的 ID 列表
         "apiBean": DEFAULT_API_BEAN,
         "methodName": DEFAULT_METHOD_NAME,
         "settleUserNum": SETTLE_USER_NUM,
     }
     if verbose:
-        print(f"[下载] POST exportExcel  "
-              f"出厂日期 {date_start}~{date_end}  "
+        print(f"[Step 2] POST exportExcel  "
+              f"memoList={len(memo_list)} 条  "
               f"apiBean={DEFAULT_API_BEAN.split('.')[-1]}  "
               f"methodName={DEFAULT_METHOD_NAME}")
     t0 = time.time()
