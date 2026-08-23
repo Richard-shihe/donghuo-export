@@ -1,11 +1,12 @@
-name: IEC 出厂码单 - 捆包下载 → 云盘
+name: IEC 出厂码单 - 捆包下载 → 云盘 → Bitable 入库
 
-# 触发方式：
-# 可在 Actions 页面手动点击 "Run workflow" 立即触发
-# 步骤：IEC 货物管理 → 出厂码单 → 码单捆包下载 → 上传飞书云盘
-#       文件夹：DfQdfSxl2ld25wdx6Rxcub9hnDf
-#       文件名：码单_YYMMDD_HHMMSS.xlsx
-# 文档见：export_iec_bundle.py 顶部 docstring
+# 触发方式：Actions 页面手动 "Run workflow" 或 cron-job.org 外部触发
+# 完整链路（to_bitable=true 时）：
+#   ① IEC 登录 → 出厂码单 → 码单捆包下载 xlsx
+#   ② 上传飞书云盘文件夹 DfQdfSxl2ld25wdx6Rxcub9hnDf
+#   ③ 从云盘下载最新+次新 xlsx → pandas 比对"捆包号"→ 生成增量 CSV
+#   ④ CSV → 按字段映射表写入 Bitable（采购订单明细汇总 tblrhqzHuTsAprU3）
+# 文档见：export_iec_bundle.py / compare_madan_in_folder.py / iec_bundle-to-ruku.py 顶部 docstring
 # 注：如使用 cron-job.org 外部触发，URL 指向本 yml 文件名 export_IEC_madan.yml
 
 on:
@@ -35,6 +36,14 @@ on:
         options:
           - "false"
           - "true"
+      to_bitable:
+        description: "上传后是否比对增量并写入 Bitable（true/false，默认 false 仅下载+上传）"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
 
 # 并发控制：同一时刻只跑一个实例
 concurrency:
@@ -43,9 +52,9 @@ concurrency:
 
 jobs:
   madan-download-upload:
-    name: IEC 出厂码单 → 飞书云盘
+    name: IEC 出厂码单 → 云盘 → Bitable
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
 
     steps:
       - name: 检出代码
@@ -63,36 +72,25 @@ jobs:
 
       - name: ① 下载出厂码单 → ② 上传飞书云盘
         env:
-          # ===== 宝钢 IEC 系统账号（在仓库 Secrets 中配置） =====
           IBAO_USERNAME: ${{ secrets.IBAO_USERNAME }}
           IBAO_PASSWORD: ${{ secrets.IBAO_PASSWORD }}
-
-          # ===== 飞书云盘（默认文件夹 DfQdfSxl2ld25wdx6Rxcub9hnDf 已在脚本硬编码） =====
           FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
           FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
-          # 如需上传到其它文件夹，在这里覆盖；留空则用默认
           FEISHU_FOLDER_TOKEN: ${{ vars.MADAN_FOLDER_TOKEN || '' }}
-
-          # ===== 飞书私信通知（默认推 洪/王阳 2 人，见 export_iec_bundle.py） =====
           FEISHU_UNION_IDS: ${{ secrets.FEISHU_UNION_IDS || '' }}
           FEISHU_NOTIFY_APP_SECRET: ${{ secrets.FEISHU_NOTIFY_APP_SECRET || '' }}
-
-          # 时区（确保文件名时间、日期范围正确）
           TZ: "Asia/Shanghai"
-
-          # workflow_dispatch 输入参数转环境变量
           DAYS_INPUT: ${{ inputs.days }}
           DATE_START_FLAG: ${{ inputs.date_start }}
           DATE_END_FLAG: ${{ inputs.date_end }}
           DRY_RUN_FLAG: ${{ inputs.dry_run }}
         run: |
           echo "触发说明: ${{ inputs.reason }}"
-          echo "近 N 天: ${DAYS_INPUT}    日期范围: ${DATE_START_FLAG}~${DATE_END_FLAG}    dry_run: ${DRY_RUN_FLAG}"
+          echo "近 N 天: ${DAYS_INPUT}    日期范围: ${DATE_START_FLAG}~${DATE_END_FLAG}    dry_run: ${DRY_RUN_FLAG}    to_bitable: ${{ inputs.to_bitable }}"
           echo "IBAO_USERNAME : ${IBAO_USERNAME:0:3}***"
           echo "FEISHU_APP_ID : ${FEISHU_APP_ID:0:7}***"
           echo "FEISHU_FOLDER : ${FEISHU_FOLDER_TOKEN:-DfQdfSxl2ld25wdx6Rxcub9hnDf (默认)}"
 
-          # 组装命令行参数
           CMD="python export_iec_bundle.py"
           if [ "$DRY_RUN_FLAG" = "true" ]; then
             CMD="$CMD --dry-run"
@@ -103,7 +101,6 @@ jobs:
           if [ -n "$DATE_END_FLAG" ]; then
             CMD="$CMD --date-end $DATE_END_FLAG"
           fi
-          # days 仅在未显式传 date_start 时生效（脚本里 --date-start 优先级高于 --days）
           if [ -z "$DATE_START_FLAG" ] && [ -n "$DAYS_INPUT" ]; then
             CMD="$CMD --days $DAYS_INPUT"
           fi
@@ -114,11 +111,57 @@ jobs:
           echo "脚本退出码: $EXIT_CODE"
           exit $EXIT_CODE
 
+      - name: ③ 比对云盘最新+次新 → 生成增量 CSV
+        if: success() && inputs.to_bitable == 'true' && inputs.dry_run == 'false'
+        env:
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          FEISHU_FOLDER_TOKEN: ${{ vars.MADAN_FOLDER_TOKEN || '' }}
+          TZ: "Asia/Shanghai"
+        run: |
+          echo "=== ③ 从云盘下载最新+次新码单，比对捆包号 ==="
+          CMD="python compare_madan_in_folder.py"
+          if [ -n "$FEISHU_FOLDER_TOKEN" ]; then
+            CMD="$CMD --folder-token $FEISHU_FOLDER_TOKEN"
+          fi
+          echo "执行命令: $CMD"
+          $CMD
+
+          # 读 CSV 数据行数（不含表头）
+          CSV_FILE="比对_最新多出记录.csv"
+          if [ -f "$CSV_FILE" ]; then
+            ADDED=$(($(wc -l < "$CSV_FILE") - 1))
+            echo "新增捆包数: $ADDED"
+            echo "added_count=$ADDED" >> $GITHUB_ENV
+          else
+            echo "❌ CSV 未生成"
+            exit 1
+          fi
+
+      - name: ④ CSV → 写入 Bitable（采购订单明细汇总）
+        if: success() && inputs.to_bitable == 'true' && inputs.dry_run == 'false' && env.added_count != '0'
+        env:
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          TZ: "Asia/Shanghai"
+        run: |
+          echo "=== ④ 增量捆包写入 Bitable (tblrhqzHuTsAprU3) ==="
+          echo "新增 ${added_count} 条，开始写入..."
+          python iec_bundle-to-ruku.py --csv 比对_最新多出记录.csv --commit
+          EXIT_CODE=$?
+          echo "写入脚本退出码: $EXIT_CODE"
+          exit $EXIT_CODE
+
+      - name: ④ 跳过（无新增捆包）
+        if: success() && inputs.to_bitable == 'true' && inputs.dry_run == 'false' && env.added_count == '0'
+        run: |
+          echo "✅ 本次无新增捆包（最新与次新完全一致），跳过 Bitable 写入"
+
       - name: 失败时告警
         if: failure()
         run: |
           echo "::warning:: 流程失败：请检查 Secrets/IEC 登录状态/飞书应用权限"
           echo "::warning::   - IBAO_USERNAME / IBAO_PASSWORD 是否仍可用"
           echo "::warning::   - FEISHU_APP_ID / FEISHU_APP_SECRET 是否正确"
-          echo "::warning::   - 飞书自建应用 cli_aaf0ce1e9ef89d27 是否已在文件夹 DfQdfSxl2ld25wdx6Rxcub9hnDf 中添加为「可编辑」协作者"
-          echo "::warning::   - 私信 Union ID 列表是否正确（FEISHU_UNION_IDS 以逗号分隔，无需空格）"
+          echo "::warning::   - 飞书自建应用是否已在云盘文件夹 + Bitable 中添加为「可编辑」协作者"
+          echo "::warning::   - 私信 Union ID 列表是否正确（FEISHU_UNION_IDS 以逗号分隔）"
