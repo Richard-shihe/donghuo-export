@@ -1,9 +1,9 @@
-name: 准发——下载 → 云盘 → 进度
-# （保留旧名兼容 cron-job.org / 旧触发器）
+name: IEC 出厂码单 - 捆包下载 → 云盘
 # 实际职责：IEC 货物管理 → 出厂码单 → 码单捆包下载 → 上传飞书云盘
 #           文件夹：DfQdfSxl2ld25wdx6Rxcub9hnDf
 #           文件名：码单_YYMMDD_HHMMSS.xlsx
 # 文档见：export_iec_bundle.py 顶部 docstring
+# 注：如使用 cron-job.org 外部触发，重命名 yml 后需同步更新触发 URL
 
 on:
   workflow_dispatch:
