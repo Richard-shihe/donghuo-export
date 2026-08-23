@@ -35,7 +35,7 @@ IEC —— 入库管理：出厂码单 → 码单捆包下载 → 飞书云盘
            （对应 URL /folder/DfQdfSxl2ld25wdx6Rxcub9hnDf）
 
 默认筛选（与网页『加载更多到 3 天左右』操作习惯对齐）：
-  出厂日期: 近 3 天 ~ 今天（= 今天前 2 天到今天，共 3 天）
+  出厂日期: 近 5 天 ~ 今天（= 今天前 4 天到今天，共 5 天）
   可用 --days N 覆盖；也可直接用 --date-start YYYYMMDD --date-end YYYYMMDD 指定具体日期。
 
 环境变量（必须配置在 GitHub Secrets 或本地 .env / 系统 env）：
@@ -45,7 +45,7 @@ IEC —— 入库管理：出厂码单 → 码单捆包下载 → 飞书云盘
   DELIVERY_MODE                        目前仅 'feishu'，即上传云盘（默认）
 
 命令行：
-  python export_iec_bundle.py                     # 出厂日期近 3 天（含今日），自动上传
+  python export_iec_bundle.py                     # 出厂日期近 5 天（含今日），自动上传
   python export_iec_bundle.py --days 30          # 近 30 天
   python export_iec_bundle.py --date-start 20260801 --date-end 20260821
   python export_iec_bundle.py --dry-run          # 只下载不上传
@@ -605,8 +605,8 @@ def parse_args():
     p = argparse.ArgumentParser(
         description="IEC 出厂码单 → 码单捆包下载 → 飞书云盘文件夹 DfQdfSxl2ld25wdx6Rxcub9hnDf",
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--days", type=int, default=3,
-                   help="出厂日期范围：近 N 天（含今日，默认 3，与网页操作习惯对齐）。"
+    p.add_argument("--days", type=int, default=5,
+                   help="出厂日期范围：近 N 天（含今日，默认 5）。"
                         "被 --date-start/end 覆盖。")
     p.add_argument("--date-start", type=_parse_yyyymmdd, default="",
                    help="出厂日期起 YYYYMMDD（默认按 --days 计算）")
