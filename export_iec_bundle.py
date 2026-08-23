@@ -35,7 +35,7 @@ IEC —— 入库管理：出厂码单 → 码单捆包下载 → 飞书云盘
            （对应 URL /folder/DfQdfSxl2ld25wdx6Rxcub9hnDf）
 
 默认筛选（与网页『加载更多到 3 天左右』操作习惯对齐）：
-  出厂日期: 近 3 天 ~ 昨天（= 昨天前 2 天到昨天，共 3 天；码单 T+1 更新，今天通常 0 条）
+  出厂日期: 近 3 天 ~ 今天（= 今天前 2 天到今天，共 3 天）
   可用 --days N 覆盖；也可直接用 --date-start YYYYMMDD --date-end YYYYMMDD 指定具体日期。
 
 环境变量（必须配置在 GitHub Secrets 或本地 .env / 系统 env）：
@@ -45,7 +45,7 @@ IEC —— 入库管理：出厂码单 → 码单捆包下载 → 飞书云盘
   DELIVERY_MODE                        目前仅 'feishu'，即上传云盘（默认）
 
 命令行：
-  python export_iec_bundle.py                     # 出厂日期近 3 天（截止昨天），自动上传
+  python export_iec_bundle.py                     # 出厂日期近 3 天（含今日），自动上传
   python export_iec_bundle.py --days 30          # 近 30 天
   python export_iec_bundle.py --date-start 20260801 --date-end 20260821
   python export_iec_bundle.py --dry-run          # 只下载不上传
@@ -140,14 +140,13 @@ def _parse_yyyymmdd(s: str) -> str:
 
 
 def _default_date_range(days: int) -> Tuple[str, str]:
-    """返回 (start, end) 的 YYYYMMDD 字符串，end=昨天, start=end 往前 days-1 天。
+    """返回 (start, end) 的 YYYYMMDD 字符串，end=今天, start=end 往前 days-1 天。
 
-    设计：出厂码单为 T+1 更新（当天不会有今天的码单），所以固定以『昨天』为截止日。
-    days=3 → [yesterday - 2 days, yesterday] 共 3 天（与网页上『加载更多到 3 天左右』对齐）。
+    days=3 → [today - 2 days, today] 共 3 天（与网页上『加载更多到 3 天左右』对齐）。
     """
-    yesterday = datetime.date.today() - datetime.timedelta(days=1)
-    start = yesterday - datetime.timedelta(days=days - 1)
-    return start.strftime("%Y%m%d"), yesterday.strftime("%Y%m%d")
+    today = datetime.date.today()
+    start = today - datetime.timedelta(days=days - 1)
+    return start.strftime("%Y%m%d"), today.strftime("%Y%m%d")
 
 
 def _auto_filename() -> str:
@@ -490,12 +489,12 @@ def parse_args():
         description="IEC 出厂码单 → 码单捆包下载 → 飞书云盘文件夹 DfQdfSxl2ld25wdx6Rxcub9hnDf",
         formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--days", type=int, default=3,
-                   help="出厂日期范围：近 N 天（截止到昨天，不含今日；默认 3，与网页操作习惯对齐）。"
+                   help="出厂日期范围：近 N 天（含今日，默认 3，与网页操作习惯对齐）。"
                         "被 --date-start/end 覆盖。")
     p.add_argument("--date-start", type=_parse_yyyymmdd, default="",
                    help="出厂日期起 YYYYMMDD（默认按 --days 计算）")
     p.add_argument("--date-end", type=_parse_yyyymmdd, default="",
-                   help="出厂日期止 YYYYMMDD（默认昨天）")
+                   help="出厂日期止 YYYYMMDD（默认今天）")
     # 可选筛选
     p.add_argument("--memo-code", default="", help="按 码单号 精确筛选（可选）")
     p.add_argument("--contract", default="", help="按 销售合同号 筛选（可选）")

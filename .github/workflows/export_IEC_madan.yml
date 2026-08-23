@@ -17,7 +17,7 @@ on:
         required: false
         default: "手动立即下载出厂码单"
       days:
-        description: "出厂日期范围：近 N 天（截止昨天，不含今日，码单 T+1；默认 3，与网页『加载更多到 3 天左右』对齐）"
+        description: "出厂日期范围：近 N 天（含今日，默认 3，与网页『加载更多到 3 天左右』对齐）"
         required: false
         default: "3"
       date_start:
