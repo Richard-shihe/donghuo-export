@@ -470,6 +470,92 @@ def feishu_upload_file(tok: str, folder_token: str, file_path: str,
     return info
 
 
+def _feishu_list_recent_madan(tok: str, folder_token: str, *,
+                              within_hours: int = 2) -> list[dict]:
+    """列出云盘 folder 内最近 within_hours 小时内创建的 码单_*.xlsx 文件。
+    返回 [{name, token, created_time, modified_time}, ...]，按创建时间倒序。
+    """
+    import re as _re
+    name_re = _re.compile(rf"^{_re.escape(FILE_PREFIX)}_(\d{{6}})_(\d{{6}})\.xlsx$")
+    items: list[dict] = []
+    page_token = ""
+    now_ts = time.time()
+    cutoff = now_ts - within_hours * 3600
+    while True:
+        params: dict = {"folder_token": folder_token, "page_size": 50,
+                        "order_by": "EditedTime", "direction": "DESC"}
+        if page_token:
+            params["page_token"] = page_token
+        r = requests.get(f"{FEISHU_OPEN_BASE}/drive/v1/files",
+                         headers={"Authorization": f"Bearer {tok}"},
+                         params=params, timeout=20, proxies=NO_PROXY)
+        d = r.json()
+        if d.get("code") != 0:
+            break
+        files = (d.get("data") or {}).get("files") or []
+        for f in files:
+            name = f.get("name", "")
+            if not name_re.match(name):
+                continue
+            cts = int(f.get("created_time") or 0)
+            # Feishu created_time 有时是秒有时是毫秒：兼容一下
+            if cts > 10_000_000_000:
+                cts = cts // 1000
+            if cts and cts < cutoff:
+                continue  # 超过时间窗口，不再看（列表是倒序，所以后面只会更旧）
+            tok_ = f.get("token") or f.get("file_token") or ""
+            if not tok_:
+                continue
+            items.append({"name": name, "token": tok_, "created_time": cts})
+        if not (d.get("data") or {}).get("has_more"):
+            break
+        page_token = (d.get("data") or {}).get("page_token") or ""
+        if not page_token:
+            break
+    items.sort(key=lambda x: x["created_time"], reverse=True)
+    return items
+
+
+def _feishu_file_bundle_ids(tok: str, file_token: str) -> Optional[set[str]]:
+    """下载云盘 xlsx，提取'捆包号'集合。失败返回 None。"""
+    try:
+        r = requests.get(f"{FEISHU_OPEN_BASE}/drive/v1/files/{file_token}/download",
+                         headers={"Authorization": f"Bearer {tok}"},
+                         timeout=120, proxies=NO_PROXY)
+        if r.status_code != 200:
+            return None
+        import tempfile, io
+        if not _HAS_PANDAS:
+            return None
+        data = io.BytesIO(r.content)
+        ext = _detect_ext(r.content[:16])
+        if ext == ".xlsx":
+            df = pd.read_excel(data, engine="openpyxl", dtype=str).fillna("")
+        else:
+            df = pd.read_excel(data, dtype=str).fillna("")
+        if "捆包号" not in df.columns:
+            return None
+        return set(df["捆包号"].astype(str).str.strip())
+    except Exception:
+        return None
+
+
+def _local_file_bundle_ids(file_path: str) -> Optional[set[str]]:
+    """读取本地 xlsx，提取'捆包号'集合。失败返回 None。"""
+    if not _HAS_PANDAS:
+        return None
+    try:
+        if file_path.lower().endswith(".xlsx"):
+            df = pd.read_excel(file_path, engine="openpyxl", dtype=str).fillna("")
+        else:
+            df = pd.read_excel(file_path, dtype=str).fillna("")
+        if "捆包号" not in df.columns:
+            return None
+        return set(df["捆包号"].astype(str).str.strip())
+    except Exception:
+        return None
+
+
 def stage_upload(file_path: str, folder_token: str) -> Optional[dict]:
     app_id = env("FEISHU_APP_ID")
     app_secret = env("FEISHU_APP_SECRET")
@@ -481,6 +567,25 @@ def stage_upload(file_path: str, folder_token: str) -> Optional[dict]:
         return None
     try:
         tok = feishu_tenant_access_token(app_id, app_secret)
+
+        # ========= 防重复：近 2 小时内云盘若已存在"捆包号完全一致"的码单文件则跳过 =========
+        local_ids = _local_file_bundle_ids(file_path)
+        if local_ids:
+            recent = _feishu_list_recent_madan(tok, folder_token, within_hours=2)
+            if recent:
+                print(f"[飞书云盘] 🔍 云盘近 2 小时已上传 {len(recent)} 个码单文件，比对捆包号集合…")
+                for f in recent:
+                    remote_ids = _feishu_file_bundle_ids(tok, f["token"])
+                    if remote_ids and remote_ids == local_ids:
+                        print(f"[飞书云盘] ⚠️  跳过重复上传：云盘已有 {f['name']} "
+                              f"（捆包号 {len(local_ids)} 个完全一致，本地上传文件名={os.path.basename(file_path)}）")
+                        # 返回一个伪结果，方便 main() 走"已上传"逻辑
+                        return {"_duplicate": True, "name": os.path.basename(file_path),
+                                "existing_file": f["name"],
+                                "token": f["token"]}
+                print(f"[飞书云盘]    未发现重复捆包集合（对比了 {len(recent)} 个文件），继续上传…")
+        # ================================================================================
+
         return feishu_upload_file(tok, folder_token, file_path)
     except Exception as e:
         print(f"[飞书云盘] ❌ 上传失败: {e}")
@@ -727,8 +832,13 @@ def main():
         # Stage 3: 通知
         elapsed = time.time() - t0
         if upload_info:
-            ft = upload_info.get("file_token") or upload_info.get("token") or ""
-            upload_line = f"已上传 → https://s2v31ke6sl.feishu.cn/drive/file/{ft}"
+            if upload_info.get("_duplicate"):
+                ft = upload_info.get("token") or ""
+                upload_line = (f"⏭️  跳过重复：已有 {upload_info.get('existing_file','')} "
+                               f"→ https://s2v31ke6sl.feishu.cn/drive/file/{ft}")
+            else:
+                ft = upload_info.get("file_token") or upload_info.get("token") or ""
+                upload_line = f"已上传 → https://s2v31ke6sl.feishu.cn/drive/file/{ft}"
         else:
             upload_line = ("跳过(DRY-RUN)" if dry_run else
                            ("失败/未配置" if rc == 0 else "下载失败，未上传"))
