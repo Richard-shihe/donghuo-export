@@ -1102,12 +1102,15 @@ def main() -> int:
     fs_app_secret = env("FEISHU_APP_SECRET")
     fs_folder_token = env("FEISHU_FOLDER_TOKEN")
     # 私聊通知：多个 Union ID 用英文逗号分隔（推荐，无需建群）
-    # 默认收件人已写死，无需配置 GitHub Secret；如需覆盖可设 FEISHU_UNION_IDS 环境变量
+    # 默认收件人已写死，无需配置 GitHub Secret
+    # 覆盖优先级：FEISHU_UNION_ID_OUYEE（临调/欧冶专用）> FEISHU_UNION_IDS > 默认写死
     DEFAULT_UNION_IDS = (
         "on_93da40c6314edbfa2dc3e031ef405389,"
         "on_b09bcbf3e74f5d423900aa9b2f00eb63"
     )
-    fs_union_ids_raw = env("FEISHU_UNION_IDS") or DEFAULT_UNION_IDS
+    fs_union_ids_raw = (env("FEISHU_UNION_ID_OUYEE")
+                        or env("FEISHU_UNION_IDS")
+                        or DEFAULT_UNION_IDS)
     fs_union_ids = [x.strip() for x in fs_union_ids_raw.split(",") if x.strip()]
     # 群聊通知：chat_id（备选，应用需已加入群）
     fs_chat_id = env("FEISHU_CHAT_ID")

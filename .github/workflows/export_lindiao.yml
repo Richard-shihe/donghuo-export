@@ -65,7 +65,10 @@ jobs:
           BITABLE_TABLE_ID: "tblaHMNprLueWYDP"
 
           # ===== 通知机器人（私聊优先，群聊/Webhook 备选） =====
-          # 私聊：FEISHU_UNION_IDS（推荐，多个 Union ID 用英文逗号分隔，如 on_A,on_B）
+          # 私聊收件人覆盖（欧冶/临调专用）：在仓库 Variables 配 FEISHU_UNION_ID_OUYEE，
+          #   多个 Union ID 用英文逗号分隔（如 on_A,on_B）；不配则用脚本内默认收件人
+          FEISHU_UNION_ID_OUYEE: ${{ vars.FEISHU_UNION_ID_OUYEE || secrets.FEISHU_UNION_ID_OUYEE || '' }}
+          # 私聊：FEISHU_UNION_IDS（通用覆盖，逗号分隔）— 优先级低于上面的 OUYEE 专用变量
           #       需要应用已发布到对方所在部门 + im:message:send_as_bot 权限
           FEISHU_UNION_IDS: ${{ secrets.FEISHU_UNION_IDS }}
           # 群聊（备选）：应用已加入的群 chat_id（oc_xxx）
