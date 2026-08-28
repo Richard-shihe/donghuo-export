@@ -396,10 +396,11 @@ def main() -> int:
         return 2
 
     bt_app_token = env("BITABLE_APP_TOKEN") or APP_TOKEN_DEFAULT
-    union_ids_raw = env("FEISHU_UNION_IDS") or DEFAULT_UNION_IDS
+    # 收件人：优先用 FEISHU_UNION_ID_OUYEE（临时覆盖），否则用默认
+    union_ids_raw = env("FEISHU_UNION_ID_OUYEE") or DEFAULT_UNION_IDS
     union_ids = [u.strip() for u in union_ids_raw.split(",") if u.strip()]
     if not union_ids:
-        print("[错误] 未配置任何 FEISHU_UNION_IDS 收件人")
+        print("[错误] 未配置任何收件人（FEISHU_UNION_ID_OUYEE / 默认值）")
         return 2
 
     print(f"[配置] app_id={fs_app_id[:6]}... bitable_app_token={bt_app_token[:6]}...")

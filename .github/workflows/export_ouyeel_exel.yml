@@ -35,11 +35,12 @@ jobs:
           pip install -r requirements.txt
 
       # 飞书应用凭证（FEISHU_APP_ID/FEISHU_APP_SECRET）复用仓库已有的 Secrets
-      # 其余配置（多维表 app_token、收件人 Union ID）已在脚本中硬编码默认值，无需单独建 Secret
+      # 收件人默认在脚本中硬编码；如需临时更换，可在 Secrets/Variables 配 FEISHU_UNION_ID_OUYEE（逗号分隔）
       - name: 运行欧冶模板导出脚本 → 生成 Excel → 飞书 IM 发送
         env:
           FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
           FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          FEISHU_UNION_ID_OUYEE: ${{ secrets.FEISHU_UNION_ID_OUYEE || vars.FEISHU_UNION_ID_OUYEE || '' }}
           TZ: "Asia/Shanghai"
         run: |
           python export_ouyeel_exel.py
