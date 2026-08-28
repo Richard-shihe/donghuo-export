@@ -1026,10 +1026,17 @@ def _feishu_sign(secret: str, timestamp: str) -> str:
     return _b64.b64encode(h.digest()).decode("utf-8")
 
 
+def receive_id_type_of(receive_id: str) -> str:
+    """按前缀自动识别：oc_ 开头 = 群 chat_id（群聊），其余按个人 union_id 处理。"""
+    return "chat_id" if receive_id.startswith("oc_") else "union_id"
+
+
 def feishu_send_im_text(token: str, receive_id: str, text: str,
-                        *, receive_id_type: str = "chat_id") -> None:
+                        *, receive_id_type: str | None = None) -> None:
     """
     用自建应用 tenant_access_token 通过 IM API 发文本消息。
+
+    receive_id_type 不传时按前缀自动识别（oc_ → chat_id，其余 → union_id）。
 
     receive_id_type 可选:
       - "chat_id"  : 发群聊（receive_id = oc_xxx）。
@@ -1040,6 +1047,7 @@ def feishu_send_im_text(token: str, receive_id: str, text: str,
       - "user_id"  : 发私聊给个人（receive_id = feishu user_id）。
       - "email"    : 发私聊给个人（receive_id = 飞书邮箱）。
     """
+    receive_id_type = receive_id_type or receive_id_type_of(receive_id)
     url = f"{FEISHU_OPEN_BASE}/im/v1/messages?receive_id_type={receive_id_type}"
     headers = {"Authorization": f"Bearer {token}"}
     payload = {
@@ -1101,12 +1109,15 @@ def main() -> int:
     fs_app_id = env("FEISHU_APP_ID")
     fs_app_secret = env("FEISHU_APP_SECRET")
     fs_folder_token = env("FEISHU_FOLDER_TOKEN")
-    # 私聊通知：多个 Union ID 用英文逗号分隔（推荐，无需建群）
-    # 默认收件人已写死，无需配置 GitHub Secret
+    # 收件人列表：支持混合类型 —— oc_ 开头 = 群 chat_id（群聊），其余 = 个人 union_id（私聊）
+    # 默认收件人已写死（2 个个人 + 2 个群），无需配置 GitHub Secret
+    # 临时换收件人：设 FEISHU_UNION_ID_OUYEE 环境变量（或 GitHub Variable）即可覆盖
     # 覆盖优先级：FEISHU_UNION_ID_OUYEE（临调/欧冶专用）> FEISHU_UNION_IDS > 默认写死
     DEFAULT_UNION_IDS = (
         "on_93da40c6314edbfa2dc3e031ef405389,"
-        "on_b09bcbf3e74f5d423900aa9b2f00eb63"
+        "on_b09bcbf3e74f5d423900aa9b2f00eb63,"
+        "oc_334f8c12e73592af76dccb5b34ccfa5f,"
+        "oc_d22e1f9c8cd0a5a3aa2b2625e2a8f155"
     )
     fs_union_ids_raw = (env("FEISHU_UNION_ID_OUYEE")
                         or env("FEISHU_UNION_IDS")
@@ -1344,22 +1355,19 @@ def main() -> int:
             sync_result=sync_result,
         )
 
-        # 通知发送优先级：
-        #   1) Union ID 私聊（FEISHU_UNION_IDS，逗号分隔，多个用户循环发）— 推荐
-        #   2) 群聊（FEISHU_CHAT_ID）— 备选
-        #   3) 自定义机器人 Webhook — 兜底
-        #   三者都没配 → 只打印日志
+        # 通知发送：收件人列表（混合 个人 on_ 私聊 + 群 oc_ 群聊），逐个发送
+        #   单个失败不阻塞其他；有任一成功 → 不走兜底；全失败 → FEISHU_CHAT_ID → Webhook → 只打印日志
         notified = False
 
         if fs_union_ids and fs_token:
             for i, uid in enumerate(fs_union_ids, 1):
                 try:
-                    feishu_send_im_text(fs_token, uid, notify_text,
-                                        receive_id_type="union_id")
+                    feishu_send_im_text(fs_token, uid, notify_text)
                     notified = True
                 except Exception as exc:
-                    print(f"[警告] IM API 私聊通知发送失败 ({i}/{len(fs_union_ids)}, "
-                          f"union_id={uid[:8]}...): {exc}")
+                    kind = "群" if uid.startswith("oc_") else "个人"
+                    print(f"[警告] IM API 通知发送失败 ({i}/{len(fs_union_ids)}, "
+                          f"{kind}={uid[:8]}...): {exc}")
 
         if not notified and fs_chat_id and fs_token:
             try:
