@@ -31,9 +31,14 @@ VIEWS = {
     "挂-砚启": "vewiMib61q",
 }
 
+# 收件人默认列表（英文逗号分隔）：
+#   on_ 开头 = 个人 union_id（私聊）
+#   oc_ 开头 = 群 chat_id（群聊），脚本按前缀自动识别 receive_id_type
 DEFAULT_UNION_IDS = (
     "on_93da40c6314edbfa2dc3e031ef405389,"
-    "on_b09bcbf3e74f5d423900aa9b2f00eb63"
+    "on_b09bcbf3e74f5d423900aa9b2f00eb63,"
+    "oc_334f8c12e73592af76dccb5b34ccfa5f,"
+    "oc_d22e1f9c8cd0a5a3aa2b2625e2a8f155"
 )
 
 # ------------------------------------------------------------
@@ -352,8 +357,14 @@ def feishu_im_upload_file(token: str, file_bytes: bytes, filename: str,
 # =========================================================================
 # 飞书 IM 发消息（文本 / 文件）
 # =========================================================================
+def receive_id_type_of(rid: str) -> str:
+    """按前缀自动识别：oc_ 开头 = 群 chat_id，其余按个人 union_id 处理。"""
+    return "chat_id" if rid.startswith("oc_") else "union_id"
+
+
 def feishu_send_im_text(token: str, receive_id: str, text: str,
-                        receive_id_type: str = "union_id"):
+                        receive_id_type: str = None):
+    receive_id_type = receive_id_type or receive_id_type_of(receive_id)
     url = f"{FEISHU_OPEN_BASE}/im/v1/messages?receive_id_type={receive_id_type}"
     headers = {"Authorization": f"Bearer {token}"}
     payload = {
@@ -369,7 +380,8 @@ def feishu_send_im_text(token: str, receive_id: str, text: str,
 
 
 def feishu_send_im_file(token: str, receive_id: str, file_key: str,
-                        receive_id_type: str = "union_id"):
+                        receive_id_type: str = None):
+    receive_id_type = receive_id_type or receive_id_type_of(receive_id)
     url = f"{FEISHU_OPEN_BASE}/im/v1/messages?receive_id_type={receive_id_type}"
     headers = {"Authorization": f"Bearer {token}"}
     payload = {
@@ -404,7 +416,8 @@ def main() -> int:
         return 2
 
     print(f"[配置] app_id={fs_app_id[:6]}... bitable_app_token={bt_app_token[:6]}...")
-    print(f"[配置] 收件人 {len(union_ids)} 个: " + ", ".join(u[:6] + "..." for u in union_ids))
+    labeled = [f"{u[:8]}...({'群' if u.startswith('oc_') else '个人'})" for u in union_ids]
+    print(f"[配置] 收件人 {len(union_ids)} 个: " + ", ".join(labeled))
 
     # 2) 换 token
     fs_token = feishu_tenant_access_token(fs_app_id, fs_app_secret)
