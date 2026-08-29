@@ -43,9 +43,9 @@ on:
         required: false
         default: ""
       max:
-        description: "最多处理多少条质保书（按 tcNumTc 去重，默认 30）"
+        description: "最多处理多少条质保书（按 tcNumTc 去重，默认 200）"
         required: false
-        default: "30"
+        default: "200"
       dry_run:
         description: "dry-run：只登录+查询+decrypt，不下载不上传（true/false）"
         required: false
