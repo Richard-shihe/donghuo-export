@@ -314,16 +314,19 @@ def main() -> int:
             time.sleep(UPLOAD_SLEEP)
         items.append(item)
 
-    # 4. 原件全部移送归档（含同名重复、含处理失败的）
+    # 4. 原件移送归档（含同名重复、含处理失败的）
+    #    只移"本次已处理"的文件；--limit 截断时，未处理文件留在待识别文件夹
+    processed_names = {f.get("name") or "" for f in unique_list}
     log(f"\n[S3] 原件移送归档 → {args.archive_folder}", log_file)
     if args.dry_run:
-        log(f"  [dry-run] 将移送 {len(files)} 个文件", log_file)
+        will_move = sum(1 for f in files if (f.get("name") or "") in processed_names)
+        log(f"  [dry-run] 将移送 {will_move} 个文件", log_file)
         summary["moved"] = 0
     else:
         for i, f in enumerate(files, 1):
             name = f.get("name") or ""
             ftok = f.get("token") or ""
-            if not name or not ftok:
+            if not name or not ftok or name not in processed_names:
                 continue
             try:
                 move_file(token, ftok, args.archive_folder)

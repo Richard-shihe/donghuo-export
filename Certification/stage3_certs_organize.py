@@ -316,6 +316,7 @@ def main() -> int:
 
     for zy_idx, (zy, fs_list) in enumerate(sorted(zy_to_files.items()), 1):
         rids = zy_to_rids.get(zy) or []
+        zy_files_failed = 0   # 该资源号本次处理的失败次数
         log(f"\n  [{zy_idx}/{len(zy_to_files)}] 资源号 {zy} → "
             f"{len(fs_list)} 个文件，{len(rids)} 条记录", log_file)
         for f in fs_list:
@@ -337,6 +338,7 @@ def main() -> int:
                     raw = download_file(token, ftok)
                 except Exception as e:
                     summary["files_failed"] += 1
+                    zy_files_failed += 1
                     log(f"      ❌ record {rid}: 下载失败: {e}", log_file)
                     continue
                 try:
@@ -344,10 +346,12 @@ def main() -> int:
                     time.sleep(UPLOAD_SLEEP)
                 except Exception as e:
                     summary["files_failed"] += 1
+                    zy_files_failed += 1
                     log(f"      ❌ record {rid}: 上传素材失败: {e}", log_file)
                     continue
                 if not new_ft:
                     summary["files_failed"] += 1
+                    zy_files_failed += 1
                     log(f"      ❌ record {rid}: 上传素材返回空 file_token", log_file)
                     continue
                 # 合并新附件（追加，不覆盖）
@@ -364,12 +368,13 @@ def main() -> int:
                     log(f"      ✅ record {rid}: 追加成功 file_token={new_ft}", log_file)
                 except Exception as e:
                     summary["files_failed"] += 1
+                    zy_files_failed += 1
                     log(f"      ❌ record {rid}: 更新记录失败: {e}", log_file)
                     continue
 
         if args.dry_run:
             summary["zy_ok"] += 1
-        elif any(rid_to_existing_tokens.get(r) for r in rids):
+        elif zy_files_failed == 0:
             summary["zy_ok"] += 1
         else:
             summary["zy_fail"] += 1
