@@ -32,6 +32,9 @@ iecc_*.json
 *.tmp
 *.bak
 
+# --- Certification 本地工作产物（下载的 PDF / A17 输出 / 快照）
+Certification/_cert_work/
+
 # --- OS
 Thumbs.db
 .DS_Store
