@@ -91,7 +91,7 @@ jobs:
           echo "FEISHU_APP_ID : ${FEISHU_APP_ID:0:7}***"
           echo "FEISHU_FOLDER : ${FEISHU_FOLDER_TOKEN:-DfQdfSxl2ld25wdx6Rxcub9hnDf (默认)}"
 
-          CMD="python export_iec_madan.py"
+          CMD="python madan/export_iec_madan.py"
           if [ "$DRY_RUN_FLAG" = "true" ]; then
             CMD="$CMD --dry-run"
           fi
@@ -120,7 +120,7 @@ jobs:
           TZ: "Asia/Shanghai"
         run: |
           echo "=== ③ 从云盘下载最新+次新码单，比对捆包号 ==="
-          CMD="python compare_madan_in_folder.py"
+          CMD="python madan/compare_madan_in_folder.py"
           if [ -n "$FEISHU_FOLDER_TOKEN" ]; then
             CMD="$CMD --folder-token $FEISHU_FOLDER_TOKEN"
           fi
@@ -147,7 +147,7 @@ jobs:
         run: |
           echo "=== ④ 增量捆包写入 Bitable (tblrhqzHuTsAprU3) ==="
           echo "新增 ${added_count} 条，开始写入..."
-          python iec_bundle-to-ruku.py --csv 比对_最新多出记录.csv --commit
+          python madan/iec_bundle-to-ruku.py --csv 比对_最新多出记录.csv --commit
           EXIT_CODE=$?
           echo "写入脚本退出码: $EXIT_CODE"
           exit $EXIT_CODE

@@ -28,11 +28,11 @@ IEC 码单 → 飞书 Bitable 入库（阶段2：增量捆包写入采购订单�
   H. 只读/系统自动：采购订单(Formula) / 创建时间(CreatedTime)
   链接：父记录(SingleLink) = 匹配记录的 record_id
 
-命令行：
-  python iec_bundle-to-ruku.py --csv 比对_最新多出记录.csv          # 干跑（默认）
-  python iec_bundle-to-ruku.py --csv 比对_最新多出记录.csv --commit # 实际写入
+命令行（建议从仓库根目录执行）：
+  python madan/iec_bundle-to-ruku.py --csv 比对_最新多出记录.csv          # 干跑（默认）
+  python madan/iec_bundle-to-ruku.py --csv 比对_最新多出记录.csv --commit # 实际写入
 
-环境变量：
+环境变量（来自仓库根目录 .env）：
   FEISHU_APP_ID / FEISHU_APP_SECRET  飞书自建应用（需 bitable:app 权限 + 目标表可编辑协作者）
 """
 from __future__ import annotations
@@ -43,7 +43,26 @@ import datetime
 import json
 import os
 import sys
+from pathlib import Path
+
 import requests
+
+# ============================================================
+# 路径定位：脚本位于 madan/，.env 在仓库根
+# ============================================================
+_HERE = Path(__file__).resolve().parent
+_REPO_ROOT = _HERE.parent
+for _p in (str(_REPO_ROOT), str(_HERE)):
+    if _p and _p not in sys.path:
+        sys.path.insert(0, _p)
+try:
+    from dotenv import load_dotenv as _load_dotenv
+    for _ep in (_REPO_ROOT / ".env", Path.cwd() / ".env"):
+        if _ep.is_file():
+            _load_dotenv(_ep, override=False)
+            break
+except ImportError:
+    pass
 
 # ============================================================
 # 常量

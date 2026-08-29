@@ -44,12 +44,18 @@ IEC —— 入库管理：出厂码单 → 码单捆包下载 → 飞书云盘
   FEISHU_FOLDER_TOKEN                  默认 DfQdfSxl2ld25wdx6Rxcub9hnDf，可覆盖
   DELIVERY_MODE                        目前仅 'feishu'，即上传云盘（默认）
 
-命令行：
-  python export_iec_madan.py                     # 出厂日期近 5 天（含今日），自动上传
-  python export_iec_madan.py --days 30          # 近 30 天
-  python export_iec_madan.py --date-start 20260801 --date-end 20260821
-  python export_iec_madan.py --dry-run          # 只下载不上传
-  python export_iec_madan.py --no-upload        # 同上（等价 DRY_RUN=1）
+命令行（建议从仓库根目录执行）：
+  python madan/export_iec_madan.py                     # 出厂日期近 5 天（含今日），自动上传
+  python madan/export_iec_madan.py --days 30          # 近 30 天
+  python madan/export_iec_madan.py --date-start 20260801 --date-end 20260821
+  python madan/export_iec_madan.py --dry-run          # 只下载不上传
+  python madan/export_iec_madan.py --no-upload        # 同上（等价 DRY_RUN=1）
+
+注：脚本现在位于 madan/ 子目录，但以下文件仍在仓库根目录（统一路径管理）：
+  - ibaosteel_client.py（IEC 登录封装）
+  - .env（环境变量）
+  - iecc.json（IEC 登录 token 缓存，会写入 CWD 方便本地复用）
+  - 码单_*.xlsx 输出文件（写入 CWD）
 """
 from __future__ import annotations
 
@@ -63,11 +69,33 @@ import re
 import sys
 import time
 import urllib.parse
+from pathlib import Path
 from typing import Optional, Tuple
 
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+
+# ============================================================
+# 路径定位：脚本在 madan/ 子目录，但 ibaosteel_client / .env 等在仓库根
+#   无论从哪里执行，都确保能 import 到 ibaosteel_client，也能找到根目录 .env
+# ============================================================
+_HERE = Path(__file__).resolve().parent             # madan/
+_REPO_ROOT = _HERE.parent                            # 仓库根
+# 把仓库根 + 脚本所在目录都加入 sys.path（兼顾根目录/子目录两种运行方式）
+for _p in (str(_REPO_ROOT), str(_HERE)):
+    if _p and _p not in sys.path:
+        sys.path.insert(0, _p)
+# dotenv：优先从仓库根目录找 .env（找不到再搜当前工作目录）
+try:
+    from dotenv import load_dotenv as _load_dotenv
+    _env_paths = [_REPO_ROOT / ".env", Path.cwd() / ".env"]
+    for _ep in _env_paths:
+        if _ep.is_file():
+            _load_dotenv(_ep, override=False)
+            break
+except ImportError:
+    pass
 
 try:
     import pandas as pd
@@ -75,7 +103,6 @@ try:
 except ImportError:
     _HAS_PANDAS = False
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ibaosteel_client import IEC
 
 
