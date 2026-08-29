@@ -1,0 +1,161 @@
+name: 质保书·① IEC 下载 → 原始件待识别文件夹
+
+# 触发方式：Actions 页面手动 "Run workflow" 或 cron-job.org 外部触发
+# 流程：IEC 登录 → 按交期查询 → decrypt → Playwright 一体化下载 PDF → 飞书云盘原始件文件夹
+# 脚本：Certification/stage1_certs_download.py
+#
+# GitHub Actions 需要的 Secrets：
+#   IBAO_USERNAME / IBAO_PASSWORD       欧冶/IEC 账密（dddDocr 过验证码）
+#   FEISHU_APP_ID / FEISHU_APP_SECRET   飞书自建应用（需 drive:drive + 文件夹「可编辑」协作者）
+#   FEISHU_NOTIFY_APP_SECRET            （可选）发私信专用应用 Secret
+#   CERT_NOTIFY_UNION_IDS               （可选，优先）汇报人员 union_id，逗号分隔；未配置回退 FEISHU_UNION_IDS
+#   FEISHU_UNION_IDS                    （回退）汇报人员 union_id
+# 可选 vars：
+#   CERT_RAW_FOLDER_TOKEN               原始件（待识别）文件夹；未配置时脚本默认 YIrbf0NzlloFNKdYAjvcL6gXnhe
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "手动触发说明（可选）"
+        required: false
+        default: "手动立即执行质保书阶段①：IEC 下载 → 原始件文件夹"
+      preset:
+        description: "交期快捷档（不带其他参数时使用）：today 当日 / week 近7天 / month 当月 / month3 近3个月"
+        required: false
+        default: "month3"
+        type: choice
+        options:
+          - "month3"
+          - "today"
+          - "week"
+          - "month"
+      days:
+        description: "交期近 N 天（指定会覆盖 preset；按月覆盖，最小粒度为月）"
+        required: false
+        default: ""
+      date_from:
+        description: "交期起 YYYYMM（优先级最高）"
+        required: false
+        default: ""
+      date_to:
+        description: "交期止 YYYYMM（留空=当月）"
+        required: false
+        default: ""
+      max:
+        description: "最多处理多少条质保书（按 tcNumTc 去重，默认 30）"
+        required: false
+        default: "30"
+      dry_run:
+        description: "dry-run：只登录+查询+decrypt，不下载不上传（true/false）"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      no_notify:
+        description: "是否跳过机器人汇报（true=跳过）"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+# 并发控制：同一时刻只跑一个实例
+concurrency:
+  group: cert-stage1-download
+  cancel-in-progress: false
+
+jobs:
+  cert-stage1-download:
+    name: 阶段① IEC 下载 → 原始件待识别
+    runs-on: ubuntu-latest
+    timeout-minutes: 45   # Playwright 逐条下载，按 50 条 × 30s 留余量
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 安装 Python 依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 安装 Playwright Chromium 浏览器
+        run: |
+          python -m playwright install chromium --with-deps
+
+      - name: 执行阶段①：IEC 登录 → 下载 → 上传原始件
+        env:
+          TZ: "Asia/Shanghai"
+          IBAO_USERNAME: ${{ secrets.IBAO_USERNAME }}
+          IBAO_PASSWORD: ${{ secrets.IBAO_PASSWORD }}
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          FEISHU_NOTIFY_APP_SECRET: ${{ secrets.FEISHU_NOTIFY_APP_SECRET || '' }}
+          NOTIFY_APP_ID: ${{ secrets.NOTIFY_APP_ID || '' }}
+          CERT_NOTIFY_UNION_IDS: ${{ secrets.CERT_NOTIFY_UNION_IDS || '' }}
+          FEISHU_UNION_IDS: ${{ secrets.FEISHU_UNION_IDS || '' }}
+          CERT_NOTIFY_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL || '' }}
+          FEISHU_WEBHOOK_SECRET: ${{ secrets.FEISHU_WEBHOOK_SECRET || '' }}
+          CERT_RAW_FOLDER_TOKEN: ${{ vars.CERT_RAW_FOLDER_TOKEN || '' }}
+          INPUT_PRESET: ${{ inputs.preset }}
+          INPUT_DAYS: ${{ inputs.days }}
+          INPUT_DATE_FROM: ${{ inputs.date_from }}
+          INPUT_DATE_TO: ${{ inputs.date_to }}
+          INPUT_MAX: ${{ inputs.max }}
+          DRY_RUN_FLAG: ${{ inputs.dry_run }}
+          NO_NOTIFY_FLAG: ${{ inputs.no_notify }}
+        run: |
+          echo "触发说明: ${{ inputs.reason }}"
+          echo "交期: preset=${INPUT_PRESET}  days=${INPUT_DAYS}  date_from=${INPUT_DATE_FROM}  date_to=${INPUT_DATE_TO}"
+          echo "最多条数: ${INPUT_MAX}    dry_run: ${DRY_RUN_FLAG}    no_notify: ${NO_NOTIFY_FLAG}"
+          echo "IBAO_USERNAME : ${IBAO_USERNAME:0:3}***"
+          echo "FEISHU_APP_ID : ${FEISHU_APP_ID:0:7}***"
+          echo "CERT_RAW_FOLDER_TOKEN : ${CERT_RAW_FOLDER_TOKEN:-YIrbf0NzlloFNKdYAjvcL6gXnhe (默认)}"
+
+          CMD="python Certification/stage1_certs_download.py"
+          # 优先级：显式 date-from/date-to > days > preset
+          if [ -n "${INPUT_DATE_FROM}" ] || [ -n "${INPUT_DATE_TO}" ]; then
+            [ -n "${INPUT_DATE_FROM}" ] && CMD="$CMD --date-from ${INPUT_DATE_FROM}"
+            [ -n "${INPUT_DATE_TO}" ]   && CMD="$CMD --date-to ${INPUT_DATE_TO}"
+          elif [ -n "${INPUT_DAYS}" ]; then
+            CMD="$CMD --days ${INPUT_DAYS}"
+          elif [ -n "${INPUT_PRESET}" ]; then
+            CMD="$CMD --preset ${INPUT_PRESET}"
+          fi
+          [ -n "${INPUT_MAX}" ] && CMD="$CMD --max ${INPUT_MAX}"
+          [ "${DRY_RUN_FLAG}" = "true" ] && CMD="$CMD --dry-run"
+          [ "${NO_NOTIFY_FLAG}" = "true" ] && CMD="$CMD --no-notify"
+
+          echo "执行命令: $CMD"
+          $CMD
+          EXIT_CODE=$?
+          echo "脚本退出码: $EXIT_CODE"
+          exit $EXIT_CODE
+
+      - name: 上传本地产物日志（调试用）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cert-stage1-logs
+          path: |
+            Certification/_cert_work/*.log
+            Certification/_cert_work/stage1_result_*.json
+          if-no-files-found: ignore
+
+      - name: 失败时告警
+        if: failure()
+        run: |
+          echo "::warning:: 阶段①流程失败，请检查以下项目："
+          echo "::warning::   - IBAO_USERNAME / IBAO_PASSWORD 是否仍可用（登录/验证码）"
+          echo "::warning::   - FEISHU_APP_ID / FEISHU_APP_SECRET 是否正确"
+          echo "::warning::   - 飞书自建应用是否已添加为原始件文件夹「可编辑」协作者"
+          echo "::warning::   - CERT_RAW_FOLDER_TOKEN vars 是否指向正确文件夹"

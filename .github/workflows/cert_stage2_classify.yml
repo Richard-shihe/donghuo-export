@@ -1,0 +1,129 @@
+name: 质保书·② A17 识别分类 → 归档
+
+# 触发方式：Actions 页面手动 "Run workflow" 或 cron-job.org 外部触发
+# 流程：拉取待识别文件夹 → 下载 → 本地 A17 识别 →
+#          识别成功 → 已识别文件夹
+#          未识别   → 未识别文件夹
+#        全部原件 → 归档文件夹
+# 脚本：Certification/stage2_certs_classify.py
+#
+# GitHub Actions 需要的 Secrets：
+#   FEISHU_APP_ID / FEISHU_APP_SECRET   飞书自建应用（drive:drive + 三个文件夹「可编辑」协作者）
+#   FEISHU_NOTIFY_APP_SECRET            （可选）发私信专用应用 Secret
+#   CERT_NOTIFY_UNION_IDS               （可选，优先）汇报人员 union_id；未配置回退 FEISHU_UNION_IDS
+#   FEISHU_UNION_IDS                    （回退）汇报人员 union_id
+# 可选 vars（未配置时脚本使用内置默认值）：
+#   CERT_RAW_FOLDER_TOKEN        待识别文件夹（原始件） 默认 YIrbf0NzlloFNKdYAjvcL6gXnhe
+#   CERT_OK_FOLDER_TOKEN         已识别文件夹            默认 VeXHfjiZqll255dgSOYcknbdnnf
+#   CERT_BAD_FOLDER_TOKEN        未识别文件夹            默认 Ic0Wf1PeelamrJd15GkcPo7Jnlb
+#   CERT_ARCHIVE_FOLDER_TOKEN    原件归档文件夹          默认 HfYCfYMZnlhVpFdKI82cTHQ5npb
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "手动触发说明（可选）"
+        required: false
+        default: "手动立即执行质保书阶段②：A17 识别分类 → 归档"
+      limit:
+        description: "最多处理多少个文件（0=全部；首次跑推荐 10~50 做小批量验证）"
+        required: false
+        default: "0"
+      dry_run:
+        description: "dry-run：下载+A17 预演，不上传不移动（true/false）"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      no_notify:
+        description: "是否跳过机器人汇报（true=跳过）"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+concurrency:
+  group: cert-stage2-classify
+  cancel-in-progress: false
+
+jobs:
+  cert-stage2-classify:
+    name: 阶段② A17 识别分类 → 归档
+    runs-on: ubuntu-latest
+    timeout-minutes: 60   # A17 PDF 解析可能耗时，按 200 份 × 15s 留余量
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 安装 Python 依赖（A17 需 pdfplumber/ocr 相关，都已在 requirements 或 A17 内）
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          # A17 依赖 pdfplumber + rapidocr-onnxruntime（requirements 当前未列，显式装以防缺失）
+          pip install pdfplumber rapidocr-onnxruntime || true
+
+      - name: 执行阶段②：下载待识别 → A17 分类 → 上传已识别/未识别 → 归档
+        env:
+          TZ: "Asia/Shanghai"
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          FEISHU_NOTIFY_APP_SECRET: ${{ secrets.FEISHU_NOTIFY_APP_SECRET || '' }}
+          NOTIFY_APP_ID: ${{ secrets.NOTIFY_APP_ID || '' }}
+          CERT_NOTIFY_UNION_IDS: ${{ secrets.CERT_NOTIFY_UNION_IDS || '' }}
+          FEISHU_UNION_IDS: ${{ secrets.FEISHU_UNION_IDS || '' }}
+          CERT_NOTIFY_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL || '' }}
+          FEISHU_WEBHOOK_SECRET: ${{ secrets.FEISHU_WEBHOOK_SECRET || '' }}
+          CERT_RAW_FOLDER_TOKEN: ${{ vars.CERT_RAW_FOLDER_TOKEN || '' }}
+          CERT_OK_FOLDER_TOKEN: ${{ vars.CERT_OK_FOLDER_TOKEN || '' }}
+          CERT_BAD_FOLDER_TOKEN: ${{ vars.CERT_BAD_FOLDER_TOKEN || '' }}
+          CERT_ARCHIVE_FOLDER_TOKEN: ${{ vars.CERT_ARCHIVE_FOLDER_TOKEN || '' }}
+          INPUT_LIMIT: ${{ inputs.limit }}
+          DRY_RUN_FLAG: ${{ inputs.dry_run }}
+          NO_NOTIFY_FLAG: ${{ inputs.no_notify }}
+        run: |
+          echo "触发说明: ${{ inputs.reason }}"
+          echo "limit: ${INPUT_LIMIT}    dry_run: ${DRY_RUN_FLAG}    no_notify: ${NO_NOTIFY_FLAG}"
+          echo "FEISHU_APP_ID : ${FEISHU_APP_ID:0:7}***"
+          echo "RAW 待识别    : ${CERT_RAW_FOLDER_TOKEN:-YIrbf0NzlloFNKdYAjvcL6gXnhe (默认)}"
+          echo "OK  已识别    : ${CERT_OK_FOLDER_TOKEN:-VeXHfjiZqll255dgSOYcknbdnnf (默认)}"
+          echo "BAD 未识别    : ${CERT_BAD_FOLDER_TOKEN:-Ic0Wf1PeelamrJd15GkcPo7Jnlb (默认)}"
+          echo "归档          : ${CERT_ARCHIVE_FOLDER_TOKEN:-HfYCfYMZnlhVpFdKI82cTHQ5npb (默认)}"
+
+          CMD="python Certification/stage2_certs_classify.py"
+          [ -n "${INPUT_LIMIT}" ] && [ "${INPUT_LIMIT}" != "0" ] && CMD="$CMD --limit ${INPUT_LIMIT}"
+          [ "${DRY_RUN_FLAG}" = "true" ] && CMD="$CMD --dry-run"
+          [ "${NO_NOTIFY_FLAG}" = "true" ] && CMD="$CMD --no-notify"
+
+          echo "执行命令: $CMD"
+          $CMD
+          EXIT_CODE=$?
+          echo "脚本退出码: $EXIT_CODE"
+          exit $EXIT_CODE
+
+      - name: 上传本地产物日志（调试用）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cert-stage2-logs
+          path: |
+            Certification/_cert_work/*.log
+            Certification/_cert_work/stage2_result_*.json
+          if-no-files-found: ignore
+
+      - name: 失败时告警
+        if: failure()
+        run: |
+          echo "::warning:: 阶段②流程失败，请检查以下项目："
+          echo "::warning::   - FEISHU_APP_ID / FEISHU_APP_SECRET 是否正确"
+          echo "::warning::   - 飞书自建应用是否已添加为 待识别/已识别/未识别/归档 四个文件夹「可编辑」协作者"
+          echo "::warning::   - A17 依赖是否完整（pdfplumber、rapidocr-onnxruntime 已显式安装）"

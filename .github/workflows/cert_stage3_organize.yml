@@ -1,0 +1,152 @@
+name: 质保书·③ 梳理 → Bitable「质保书」字段
+
+# 触发方式：Actions 页面手动 "Run workflow" 或 cron-job.org 外部触发
+# 流程：列已识别文件夹 → 按资源号匹配 Bitable 记录 →
+#        下载 → 上传 bitable 附件 → 合并追加到「质保书」字段（两层去重幂等）→
+#        （可选）把已梳理文件移动到归档文件夹
+# 脚本：Certification/stage3_certs_organize.py
+#
+# GitHub Actions 需要的 Secrets：
+#   FEISHU_APP_ID / FEISHU_APP_SECRET   飞书自建应用（drive:drive + bitable:app + 文件夹/表格「可编辑」协作者）
+#   FEISHU_NOTIFY_APP_SECRET            （可选）发私信专用应用 Secret
+#   CERT_NOTIFY_UNION_IDS               （可选，优先）汇报人员 union_id；未配置回退 FEISHU_UNION_IDS
+#   FEISHU_UNION_IDS                    （回退）汇报人员 union_id
+# 可选 vars（未配置时脚本使用内置默认值）：
+#   CERT_OK_FOLDER_TOKEN     已识别（源）文件夹              默认 VeXHfjiZqll255dgSOYcknbdnnf
+#   ARCHIVE_FOLDER_TOKEN     （--move-to 时）归档文件夹     无默认（默认不移）
+#   PROGRESS_BITABLE_TOKEN   进度表 app_token                默认 Tz0XbQVzkaZuJasBwb8cRjkfnoe
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "手动触发说明（可选）"
+        required: false
+        default: "手动立即执行质保书阶段③：梳理 → Bitable 质保书字段"
+      resource:
+        description: "只处理指定资源号（逗号分隔多个），留空=全部"
+        required: false
+        default: ""
+      only_matched:
+        description: "只处理能匹配到 Bitable 资源号的文件（true/false，默认 true）"
+        required: false
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+      move_archive:
+        description: "梳理完成后是否把已梳理文件移动到归档文件夹（true/false）"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      dry_run:
+        description: "dry-run：只列文件+匹配，不下载不上传不移动（true/false）"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      no_notify:
+        description: "是否跳过机器人汇报（true=跳过）"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+concurrency:
+  group: cert-stage3-organize
+  cancel-in-progress: false
+
+jobs:
+  cert-stage3-organize:
+    name: 阶段③ 梳理 → Bitable 质保书字段
+    runs-on: ubuntu-latest
+    timeout-minutes: 30   # 素材上传 QPS≈5，500 份约 100s，加上网络 30 分钟足够
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 安装 Python 依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 执行阶段③：列已识别文件夹 → 匹配资源号 → 写 Bitable「质保书」字段
+        env:
+          TZ: "Asia/Shanghai"
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          FEISHU_NOTIFY_APP_SECRET: ${{ secrets.FEISHU_NOTIFY_APP_SECRET || '' }}
+          NOTIFY_APP_ID: ${{ secrets.NOTIFY_APP_ID || '' }}
+          CERT_NOTIFY_UNION_IDS: ${{ secrets.CERT_NOTIFY_UNION_IDS || '' }}
+          FEISHU_UNION_IDS: ${{ secrets.FEISHU_UNION_IDS || '' }}
+          CERT_NOTIFY_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL || '' }}
+          FEISHU_WEBHOOK_SECRET: ${{ secrets.FEISHU_WEBHOOK_SECRET || '' }}
+          BITABLE_APP_TOKEN: ${{ vars.PROGRESS_BITABLE_TOKEN || 'Tz0XbQVzkaZuJasBwb8cRjkfnoe' }}
+          BITABLE_TABLE_ID:  ${{ vars.CERT_PROGRESS_TABLE_ID   || 'tblvugnoJPS8GrpX' }}
+          CERT_OK_FOLDER_TOKEN: ${{ vars.CERT_OK_FOLDER_TOKEN || '' }}
+          ARCHIVE_FOLDER_TOKEN: ${{ vars.ARCHIVE_FOLDER_TOKEN || '' }}
+          INPUT_RESOURCE: ${{ inputs.resource }}
+          INPUT_ONLY_MATCHED: ${{ inputs.only_matched }}
+          INPUT_MOVE_ARCHIVE: ${{ inputs.move_archive }}
+          DRY_RUN_FLAG: ${{ inputs.dry_run }}
+          NO_NOTIFY_FLAG: ${{ inputs.no_notify }}
+        run: |
+          echo "触发说明: ${{ inputs.reason }}"
+          echo "resource: ${INPUT_RESOURCE:-全部}    only_matched: ${INPUT_ONLY_MATCHED}"
+          echo "move_archive: ${INPUT_MOVE_ARCHIVE}    dry_run: ${DRY_RUN_FLAG}    no_notify: ${NO_NOTIFY_FLAG}"
+          echo "FEISHU_APP_ID   : ${FEISHU_APP_ID:0:7}***"
+          echo "BITABLE_APP     : ${BITABLE_APP_TOKEN} / ${BITABLE_TABLE_ID}"
+          echo "源（已识别）    : ${CERT_OK_FOLDER_TOKEN:-VeXHfjiZqll255dgSOYcknbdnnf (默认)}"
+          echo "归档文件夹      : ${ARCHIVE_FOLDER_TOKEN:-(未配置，move_archive=true 时请配置 vars.ARCHIVE_FOLDER_TOKEN)}"
+
+          CMD="python Certification/stage3_certs_organize.py"
+          [ -n "${INPUT_RESOURCE}" ] && CMD="$CMD --resource ${INPUT_RESOURCE}"
+          [ "${INPUT_ONLY_MATCHED}" = "true" ] && CMD="$CMD --only-matched"
+          [ "${INPUT_MOVE_ARCHIVE}" = "true" ] && [ -n "${ARCHIVE_FOLDER_TOKEN}" ] && \
+            CMD="$CMD --move-to ${ARCHIVE_FOLDER_TOKEN}"
+          [ "${DRY_RUN_FLAG}" = "true" ] && CMD="$CMD --dry-run"
+          [ "${NO_NOTIFY_FLAG}" = "true" ] && CMD="$CMD --no-notify"
+
+          if [ "${INPUT_MOVE_ARCHIVE}" = "true" ] && [ -z "${ARCHIVE_FOLDER_TOKEN}" ]; then
+            echo "::warning:: move_archive=true 但 vars.ARCHIVE_FOLDER_TOKEN 未配置，将跳过归档移动。"
+          fi
+
+          echo "执行命令: $CMD"
+          $CMD
+          EXIT_CODE=$?
+          echo "脚本退出码: $EXIT_CODE"
+          exit $EXIT_CODE
+
+      - name: 上传本地产物日志（调试用）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cert-stage3-logs
+          path: |
+            Certification/_cert_work/*.log
+            Certification/_cert_work/stage3_result_*.json
+          if-no-files-found: ignore
+
+      - name: 失败时告警
+        if: failure()
+        run: |
+          echo "::warning:: 阶段③流程失败，请检查以下项目："
+          echo "::warning::   - FEISHU_APP_ID / FEISHU_APP_SECRET 是否正确"
+          echo "::warning::   - 飞书自建应用是否已添加为已识别文件夹「可编辑」协作者"
+          echo "::warning::   - 飞书自建应用是否有 bitable:app 权限 + 进度表「可编辑」协作者"
+          echo "::warning::   - 目标字段（质保书）在多维表的字段权限中已对该应用授权可写"
+          echo "::warning::   - 归档移动时确保 ARCHIVE_FOLDER_TOKEN vars 已配置"
