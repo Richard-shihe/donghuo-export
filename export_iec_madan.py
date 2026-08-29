@@ -855,12 +855,13 @@ def main():
         print(message)
         print("=" * 66)
 
-        if rc == 0:
-            stage_notify_webhook(message)
-            stage_notify_dm(message, notify_ids,
-                            notify_app_id=notify_app_id,
-                            notify_app_secret=env("FEISHU_NOTIFY_APP_SECRET") or "",
-                            default_app_secret=env("FEISHU_APP_SECRET") or "")
+        # 通知暂时关闭（用户要求）
+        # if rc == 0:
+        #     stage_notify_webhook(message)
+        #     stage_notify_dm(message, notify_ids,
+        #                     notify_app_id=notify_app_id,
+        #                     notify_app_secret=env("FEISHU_NOTIFY_APP_SECRET") or "",
+        #                     default_app_secret=env("FEISHU_APP_SECRET") or "")
     finally:
         # 确保 iec token 持久化到 iecc.json，避免下次再跑验证码
         try:
