@@ -35,7 +35,7 @@
   BITABLE_APP_TOKEN / BITABLE_TABLE_ID / BITABLE_FIELD_CERT
   ARCHIVE_FOLDER_TOKEN        （可选）覆盖归档文件夹（默认 H24ifEj4alUBF6dzeioctPqinsf）
   CERT_BAD_FOLDER_TOKEN       （可选）覆盖未识别文件夹（默认 Ic0Wf1PeelamrJd15GkcPo7Jnlb）
-  CERT_UNMATCHED_FOLDER_TOKEN （可选）未匹配文件夹（无法匹配资源号的件移送至此；未配置则留在新识别）
+  CERT_UNMATCHED_FOLDER_TOKEN （可选）未匹配文件夹（默认 Pvm7fmsJGlu3UHdK70dc7uFqndc）
   CERT_NOTIFY_UNION_IDS       汇报人员 union_id（逗号分隔；回退 FEISHU_UNION_IDS）
 """
 from __future__ import annotations
@@ -73,7 +73,7 @@ DEFAULT_APP_TOKEN = "Tz0XbQVzkaZuJasBwb8cRjkfnoe"
 DEFAULT_TABLE_ID = "tblvugnoJPS8GrpX"
 DEFAULT_ARCHIVE_FOLDER = "H24ifEj4alUBF6dzeioctPqinsf"  # 梳理成功后的归档文件夹
 DEFAULT_BAD_FOLDER = "Ic0Wf1PeelamrJd15GkcPo7Jnlb"      # 阶段②未识别文件夹（通知里提示待人工处理）
-DEFAULT_UNMATCHED_FOLDER = env("CERT_UNMATCHED_FOLDER_TOKEN", "")  # 未匹配文件夹（无法匹配资源号的件移送至此；未配置则不移送）
+DEFAULT_UNMATCHED_FOLDER = env("CERT_UNMATCHED_FOLDER_TOKEN", "Pvm7fmsJGlu3UHdK70dc7uFqndc")  # 未匹配文件夹（无法匹配资源号的件移送至此；未配置则不移送）
 FIELD_ZIYUANHAO = "资源号"
 FIELD_CERT = env("BITABLE_FIELD_CERT", "质保书")
 
