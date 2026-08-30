@@ -202,12 +202,23 @@ def iec_login_and_enter() -> Tuple[IEC, requests.Session, str]:
     s = iec.session
     token = iec.token
     ref = f"{IECS_INDEX}?token={token}"
-    r0 = s.get(ref, timeout=20, headers={"Referer": ref})
-    if r0.status_code != 200:
-        raise RuntimeError(f"打开 iecs/index 失败 status={r0.status_code}")
-    r1 = s.get(WEIGHTMEMO_PAGE, timeout=20, headers={"Referer": ref})
-    if r1.status_code != 200 or len(r1.text) < 5000:
-        raise RuntimeError(f"打开出厂码单页面失败 status={r1.status_code} len={len(r1.text)}")
+    # IEC 服务器处理大批量导出时可能瞬时无响应，进页面超时放宽并重试
+    last_err: Exception | None = None
+    for attempt in range(3):
+        try:
+            r0 = s.get(ref, timeout=60, headers={"Referer": ref})
+            if r0.status_code != 200:
+                raise RuntimeError(f"打开 iecs/index 失败 status={r0.status_code}")
+            r1 = s.get(WEIGHTMEMO_PAGE, timeout=60, headers={"Referer": ref})
+            if r1.status_code != 200 or len(r1.text) < 5000:
+                raise RuntimeError(f"打开出厂码单页面失败 status={r1.status_code} len={len(r1.text)}")
+            break
+        except (requests.RequestException, RuntimeError) as e:
+            last_err = e
+            print(f"[IEC] 进页面失败（第 {attempt+1}/3 次）: {e}  20s 后重试…", flush=True)
+            time.sleep(20)
+    else:
+        raise RuntimeError(f"进出厂码单页连续 3 次失败: {last_err}")
     print(f"[IEC] 登录 OK → 出厂码单页 size={len(r1.text)}")
     return iec, s, token
 
