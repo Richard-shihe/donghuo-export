@@ -34,6 +34,7 @@
   CERT_OK_FOLDER_TOKEN        源文件夹（默认 VeXHfjiZqll255dgSOYcknbdnnf）
   BITABLE_APP_TOKEN / BITABLE_TABLE_ID / BITABLE_FIELD_CERT
   ARCHIVE_FOLDER_TOKEN        （可选）覆盖归档文件夹（默认 H24ifEj4alUBF6dzeioctPqinsf）
+  CERT_BAD_FOLDER_TOKEN       （可选）覆盖未识别文件夹（默认 Ic0Wf1PeelamrJd15GkcPo7Jnlb）
   CERT_NOTIFY_UNION_IDS       汇报人员 union_id（逗号分隔；回退 FEISHU_UNION_IDS）
 """
 from __future__ import annotations
@@ -70,6 +71,7 @@ DEFAULT_SOURCE_FOLDER = "VeXHfjiZqll255dgSOYcknbdnnf"
 DEFAULT_APP_TOKEN = "Tz0XbQVzkaZuJasBwb8cRjkfnoe"
 DEFAULT_TABLE_ID = "tblvugnoJPS8GrpX"
 DEFAULT_ARCHIVE_FOLDER = "H24ifEj4alUBF6dzeioctPqinsf"  # 梳理成功后的归档文件夹
+DEFAULT_BAD_FOLDER = "Ic0Wf1PeelamrJd15GkcPo7Jnlb"      # 阶段②未识别文件夹（通知里提示待人工处理）
 FIELD_ZIYUANHAO = "资源号"
 FIELD_CERT = env("BITABLE_FIELD_CERT", "质保书")
 
@@ -212,6 +214,8 @@ def parse_args() -> argparse.Namespace:
                    help=f"梳理成功后把文件移动到归档文件夹（默认 {DEFAULT_ARCHIVE_FOLDER}）")
     p.add_argument("--no-move", action="store_true",
                    help="禁用归档移动（处理完的文件留在已识别文件夹）")
+    p.add_argument("--bad-folder", default=env("CERT_BAD_FOLDER_TOKEN", DEFAULT_BAD_FOLDER),
+                   help=f"阶段②未识别文件夹（通知中提示待人工处理数量，默认 {DEFAULT_BAD_FOLDER}）")
     p.add_argument("--only-matched", action="store_true",
                    help="只处理能匹配到 Bitable 资源号的文件")
     p.add_argument("--resource", default="",
@@ -320,6 +324,7 @@ def main() -> int:
         "files_moved": 0, "files_move_failed": 0,
     }
     organized_names: set[str] = set()   # 已梳理文件名（上传成功或同名跳过）
+    failed_items: set[str] = set()      # 处理失败明细（通知中突出显示）
 
     for zy_idx, (zy, fs_list) in enumerate(sorted(zy_to_files.items()), 1):
         rids = zy_to_rids.get(zy) or []
@@ -346,6 +351,7 @@ def main() -> int:
                 except Exception as e:
                     summary["files_failed"] += 1
                     zy_files_failed += 1
+                    failed_items.add(f"{fname}（下载失败）")
                     log(f"      ❌ record {rid}: 下载失败: {e}", log_file)
                     continue
                 try:
@@ -354,11 +360,13 @@ def main() -> int:
                 except Exception as e:
                     summary["files_failed"] += 1
                     zy_files_failed += 1
+                    failed_items.add(f"{fname}（上传素材失败）")
                     log(f"      ❌ record {rid}: 上传素材失败: {e}", log_file)
                     continue
                 if not new_ft:
                     summary["files_failed"] += 1
                     zy_files_failed += 1
+                    failed_items.add(f"{fname}（上传素材返回空 file_token）")
                     log(f"      ❌ record {rid}: 上传素材返回空 file_token", log_file)
                     continue
                 # 合并新附件（追加，不覆盖）
@@ -376,6 +384,7 @@ def main() -> int:
                 except Exception as e:
                     summary["files_failed"] += 1
                     zy_files_failed += 1
+                    failed_items.add(f"{fname}（写入 Bitable 失败）")
                     log(f"      ❌ record {rid}: 更新记录失败: {e}", log_file)
                     continue
 
@@ -409,10 +418,36 @@ def main() -> int:
                 summary["files_move_failed"] += 1
                 log(f"  [{moved_idx}] ❌ 移动失败 {fname}: {e}", log_file)
 
-    # 7. 汇报
+    # 7. 汇报（未匹配/失败明细突出显示）
     elapsed = int(time.time() - t0)
     mins, secs = divmod(elapsed, 60)
-    msg = (f"【质保书·③入库Bitable】完成 {'✅' if not summary['zy_fail'] else '⚠️'}\n"
+
+    # 阶段②未识别文件夹现状（只读统计，失败不影响主流程）
+    bad_hint = ""
+    if args.bad_folder:
+        try:
+            bad_files = list_folder_files(token, args.bad_folder)
+            if bad_files:
+                bad_hint = (f"\n📋 未识别文件夹还有 {len(bad_files)} 个质保书待人工识别"
+                            f"\n   （A17 识别失败，见 {folder_url(args.bad_folder)}）")
+        except Exception as e:
+            log(f"⚠️ 未识别文件夹统计失败（不影响主流程）: {e}", log_file)
+
+    issues: list[str] = []
+    if unmatched:
+        names = [f.get("name") or "?" for f in unmatched]
+        shown = "\n".join(f"    · {n}" for n in names[:8])
+        more = f"\n    · …等共 {len(names)} 个" if len(names) > 8 else ""
+        issues.append(f"  ❗ 以下 {len(names)} 个文件无法匹配资源号，未入库"
+                      f"（资源号提取失败，或表中无此资源号）：\n{shown}{more}")
+    if failed_items:
+        uniq = sorted(failed_items)
+        shown = "\n".join(f"    · {x}" for x in uniq[:8])
+        more = f"\n    · …等共 {len(uniq)} 个" if len(uniq) > 8 else ""
+        issues.append(f"  ❗ 以下 {len(uniq)} 个文件处理失败（重跑本阶段可自动重试）：\n{shown}{more}")
+
+    has_issue = bool(issues) or summary["zy_fail"] > 0
+    msg = (f"【质保书·③入库Bitable】完成 {'⚠️' if has_issue else '✅'}\n"
            f"源文件 {len(files)} 个（同名重复 {dup_in_folder}，无法匹配 {len(unmatched)}）\n"
            f"资源号: 匹配 {len(zy_to_files)} 个（成功 {summary['zy_ok']} / 失败 {summary['zy_fail']}）\n"
            f"附件写入: {summary['files_uploaded']}"
@@ -421,7 +456,9 @@ def main() -> int:
            f"更新记录: {summary['records_updated']} 次\n"
            f"目标表: {args.app_token} / {args.table_id}\n"
            + (f"归档移动: {summary['files_moved']}（失败 {summary['files_move_failed']}）\n" if move_enabled else "")
-           + f"耗时: {mins}分{secs}秒")
+           + f"耗时: {mins}分{secs}秒"
+           + (("\n\n⚠️ 待人工处理：\n" + "\n".join(issues)) if issues else "")
+           + bad_hint)
     print(msg)
     if not args.dry_run and not args.no_notify:
         notify(msg)
