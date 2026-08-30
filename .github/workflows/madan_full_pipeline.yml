@@ -1,0 +1,172 @@
+name: 码单·全链路 下载 → 云盘 → 比对 → 写 Bitable
+
+# ============================================================
+# 码单流水线 · 一键全链路（整合阶段 1 + 2 + 3）
+#
+# 流程：
+#   Job 1 · stage1     登录 IEC → 下载码单捆包 xlsx → 飞云盘
+#   Job 2 · stage23    云盘最新+次新比对 → 有增量则写 Bitable
+#                      （stage1 需要成功 + to_bitable=true + dry_run=false 才跑）
+#
+# 什么时候用？
+#   ✅ 想一条龙跑完、入库全链路
+#   ✅ 手动触发一次完整"补数"
+#
+# 什么时候用拆分的 workflow？
+#   🔘 只要例行下载 → madan_1_download.yml（已带内建 schedule，每 30 分钟自动跑）
+#   🔘 只要重新入库 → madan_2_compare_ruku.yml
+# ============================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "手动触发说明（可选）"
+        required: false
+        default: "手动一键跑完整码单流水线"
+      days:
+        description: "码单日期范围：近 N 天（含今日，默认 5）"
+        required: false
+        default: "5"
+      date_start:
+        description: "码单日期起 YYYYMMDD（留空用 days 计算）"
+        required: false
+        default: ""
+      date_end:
+        description: "码单日期止 YYYYMMDD（留空=今天）"
+        required: false
+        default: ""
+      dry_run:
+        description: "仅下载不上传（true）/ 实际上传（false）"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      to_bitable:
+        description: "是否进入 Bitable 比对+入库（true/false，默认 false 只到云盘）"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+concurrency:
+  group: madan-full-pipeline
+  cancel-in-progress: false
+
+jobs:
+  # -------------------- Stage 1 · 下载 + 上云盘 --------------------
+  stage1-download:
+    name: 阶段1 IEC 码单下载 → 飞书云盘
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      TZ: "Asia/Shanghai"
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 安装 Python 依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: ① 登录 IEC → 下载码单捆包 xlsx → ② 飞云盘
+        env:
+          IBAO_USERNAME:       ${{ secrets.IBAO_USERNAME }}
+          IBAO_PASSWORD:       ${{ secrets.IBAO_PASSWORD }}
+          FEISHU_APP_ID:       ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET:   ${{ secrets.FEISHU_APP_SECRET }}
+          FEISHU_FOLDER_TOKEN: ${{ vars.MADAN_FOLDER_TOKEN || '' }}
+          DAYS_INPUT:          ${{ inputs.days       || '5' }}
+          DATE_START_FLAG:     ${{ inputs.date_start || '' }}
+          DATE_END_FLAG:       ${{ inputs.date_end   || '' }}
+          DRY_RUN_FLAG:        ${{ inputs.dry_run    || 'false' }}
+        run: |
+          echo "触发说明: ${{ inputs.reason }}"
+          echo "日期范围: ${DATE_START_FLAG:-auto} ~ ${DATE_END_FLAG:-today}  (近 ${DAYS_INPUT} 天)"
+          echo "DRY_RUN   : ${DRY_RUN_FLAG}    to_bitable: ${{ inputs.to_bitable }}"
+          echo "IBAO_USER : ${IBAO_USERNAME:0:3}***    FEISHU_APP: ${FEISHU_APP_ID:0:7}***"
+
+          CMD="python madan/export_iec_madan.py"
+          if [ "$DRY_RUN_FLAG" = "true" ]; then CMD="$CMD --dry-run"; fi
+          if [ -n "$DATE_START_FLAG" ];      then CMD="$CMD --date-start $DATE_START_FLAG"; fi
+          if [ -n "$DATE_END_FLAG" ];        then CMD="$CMD --date-end   $DATE_END_FLAG";   fi
+          if [ -z "$DATE_START_FLAG" ] && [ -n "$DAYS_INPUT" ]; then CMD="$CMD --days $DAYS_INPUT"; fi
+
+          echo "→ 执行: $CMD"
+          $CMD
+
+      - name: 失败时告警
+        if: failure()
+        run: |
+          echo "::error::阶段1 下载失败。请检查 IEC 账号密码、飞书 App 权限、协作者权限。"
+
+  # -------------------- Stage 2+3 · 比对 + 入库 --------------------
+  stage23-compare-ruku:
+    name: 阶段2+3 比对 → 写 Bitable
+    needs: stage1-download
+    if: success() && inputs.to_bitable == 'true' && inputs.dry_run == 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      TZ: "Asia/Shanghai"
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 安装 Python 依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: ③ 云盘最新+次新 → 比对捆包号 → 增量 CSV
+        env:
+          FEISHU_APP_ID:       ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET:   ${{ secrets.FEISHU_APP_SECRET }}
+          FEISHU_FOLDER_TOKEN: ${{ vars.MADAN_FOLDER_TOKEN || '' }}
+        run: |
+          CMD="python madan/compare_madan_in_folder.py"
+          if [ -n "$FEISHU_FOLDER_TOKEN" ]; then CMD="$CMD --folder-token $FEISHU_FOLDER_TOKEN"; fi
+          echo "→ 执行: $CMD"
+          $CMD
+
+          CSV_FILE="比对_最新多出记录.csv"
+          if [ ! -f "$CSV_FILE" ]; then echo "❌ CSV 未生成"; exit 1; fi
+          ADDED=$(($(wc -l < "$CSV_FILE") - 1))
+          echo "新增捆包数: $ADDED"
+          echo "added_count=$ADDED" >> $GITHUB_ENV
+          echo "--- CSV 前 3 行 ---"
+          head -n 3 "$CSV_FILE"
+
+      - name: ④ 写入 Bitable（有新增时）
+        if: success() && env.added_count != '0'
+        env:
+          FEISHU_APP_ID:     ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+        run: |
+          echo "新增 ${added_count} 条 → 写入 采购订单明细汇总 (tblrhqzHuTsAprU3)"
+          python madan/iec_bundle-to-ruku.py --csv 比对_最新多出记录.csv --commit
+          echo "✅ 写入完成"
+
+      - name: ④ 跳过（无新增）
+        if: success() && env.added_count == '0'
+        run: echo "✅ 无新增捆包 → 跳过写入 Bitable"
+
+      - name: 失败时告警
+        if: failure()
+        run: |
+          echo "::error::阶段2+3 比对入库失败。请检查 FEISHU 权限、bitble 协作者、云盘文件数 >= 2。"

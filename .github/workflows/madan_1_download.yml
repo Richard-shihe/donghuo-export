@@ -1,0 +1,109 @@
+name: 码单·阶段1 IEC 下载 → 飞书云盘
+
+# ============================================================
+# 码单流水线 · 阶段 1（独立）
+#   ① 登录 IEC
+#   ② 按日期范围下载"出厂码单 → 码单捆包下载"xlsx
+#   ③ 防重复检查后上传飞书云盘
+#
+# 适用场景：
+#   - 手动立即执行（Actions 页面 Run workflow）
+#   - 外部定时服务触发（如 cron-job.org）
+#   - 想"只刷新码单数据"、暂不入库 Bitable
+#
+# 关联：madan/export_iec_madan.py
+# ============================================================
+
+on:
+  # --- 手动触发（GitHub Actions 页面点 Run workflow）---
+  # 注：不带内建 schedule；如需定时由外部服务（cron-job.org 等）触发
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "手动触发说明（可选）"
+        required: false
+        default: "手动立即下载出厂码单"
+      days:
+        description: "码单日期范围：近 N 天（含今日，默认 5）"
+        required: false
+        default: "5"
+      date_start:
+        description: "码单日期起 YYYYMMDD（留空用 days 计算）"
+        required: false
+        default: ""
+      date_end:
+        description: "码单日期止 YYYYMMDD（留空=今天）"
+        required: false
+        default: ""
+      dry_run:
+        description: "仅下载不上传（true） 实际上传（false）"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+# 并发：防止重复触发（同 workflow 串行，不取消进行中的）
+concurrency:
+  group: madan-stage1-download
+  cancel-in-progress: false
+
+jobs:
+  stage1-download:
+    name: IEC 码单下载 → 飞书云盘
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      TZ: "Asia/Shanghai"
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 安装 Python 依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: ① 登录 IEC → 下载码单捆包 xlsx → ② 飞云盘（或 DRY-RUN 跳过）
+        env:
+          IBAO_USERNAME:      ${{ secrets.IBAO_USERNAME }}
+          IBAO_PASSWORD:      ${{ secrets.IBAO_PASSWORD }}
+          FEISHU_APP_ID:      ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET:  ${{ secrets.FEISHU_APP_SECRET }}
+          FEISHU_FOLDER_TOKEN: ${{ vars.MADAN_FOLDER_TOKEN || '' }}
+          DAYS_INPUT:          ${{ inputs.days      || '5' }}
+          DATE_START_FLAG:     ${{ inputs.date_start || '' }}
+          DATE_END_FLAG:       ${{ inputs.date_end   || '' }}
+          DRY_RUN_FLAG:        ${{ inputs.dry_run    || 'false' }}
+        run: |
+          echo "触发方式: ${{ github.event_name }}"
+          echo "触发说明: ${{ inputs.reason || '(schedule 定时自动执行)' }}"
+          echo "日期范围: ${DATE_START_FLAG:-auto} ~ ${DATE_END_FLAG:-today}  (近 ${DAYS_INPUT} 天)"
+          echo "DRY_RUN   : ${DRY_RUN_FLAG}"
+          echo "IBAO_USER : ${IBAO_USERNAME:0:3}***    FEISHU_APP: ${FEISHU_APP_ID:0:7}***"
+
+          CMD="python madan/export_iec_madan.py"
+          if [ "$DRY_RUN_FLAG" = "true" ]; then CMD="$CMD --dry-run"; fi
+          if [ -n "$DATE_START_FLAG" ];      then CMD="$CMD --date-start $DATE_START_FLAG"; fi
+          if [ -n "$DATE_END_FLAG" ];        then CMD="$CMD --date-end   $DATE_END_FLAG";   fi
+          if [ -z "$DATE_START_FLAG" ] && [ -n "$DAYS_INPUT" ]; then CMD="$CMD --days $DAYS_INPUT"; fi
+
+          echo "→ 执行: $CMD"
+          $CMD
+
+      - name: 失败时告警
+        if: failure()
+        run: |
+          echo "::error::阶段1失败，请检查以下项："
+          echo "  1. IEC 账号密码 IBAO_USERNAME / IBAO_PASSWORD 是否仍可用（验证码可能要求人工刷新）"
+          echo "  2. GitHub Secrets 中 FEISHU_APP_ID / FEISHU_APP_SECRET 是否正确"
+          echo "  3. 飞书自建应用是否已被添加为云盘文件夹 DfQdfSxl2ld25wdx6Rxcub9hnDf 的「可编辑」协作者"
+          echo "  4. vars.MADAN_FOLDER_TOKEN 如配置是否覆盖了正确的 folder_token"

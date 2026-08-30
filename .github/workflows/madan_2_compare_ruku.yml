@@ -1,0 +1,132 @@
+name: 码单·阶段2+3 云盘比对 → 增量写 Bitable
+
+# ============================================================
+# 码单流水线 · 阶段 2 + 3（独立）
+#   ③ 从飞书云盘下载最新 + 次新 两个 码单_*.xlsx
+#   ④ pandas 按"捆包号"做差集 → 生成 比对_最新多出记录.csv
+#   ⑤ 新增数 > 0 时，按字段映射表写入 Bitable
+#        「采购订单明细汇总」tblrhqzHuTsAprU3
+#
+# 适用场景：
+#   - 已经有两个文件在云盘了，只想"跑一遍入库"
+#   - 阶段1 单独跑成功后，隔段时间再入库
+#   - 重跑入库（不想再拉一次 IEC，省验证码）
+#
+# 关联：madan/compare_madan_in_folder.py + madan/iec_bundle-to-ruku.py
+# ============================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "手动触发说明（可选）"
+        required: false
+        default: "手动立即比对最新两份码单并入库"
+      folder_token:
+        description: "云盘 folder_token（留空=用默认 DfQdfSxl2ld25wdx6Rxcub9hnDf）"
+        required: false
+        default: ""
+      csv:
+        description: "输出 CSV 文件名（留空=比对_最新多出记录.csv）"
+        required: false
+        default: ""
+      commit:
+        description: "实际写入 Bitable（true）/ 仅干跑预览（false）"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+concurrency:
+  group: madan-stage23-compare-ruku
+  cancel-in-progress: false
+
+jobs:
+  stage23-compare-ruku:
+    name: 云盘比对 → 写 Bitable
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      TZ: "Asia/Shanghai"
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 安装 Python 依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: ③ 云盘最新 + 次新 → 比对捆包号 → 增量 CSV
+        env:
+          FEISHU_APP_ID:      ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET:  ${{ secrets.FEISHU_APP_SECRET }}
+          FEISHU_FOLDER_TOKEN: ${{ inputs.folder_token || vars.MADAN_FOLDER_TOKEN || '' }}
+          CSV_FLAG:            ${{ inputs.csv || '' }}
+        run: |
+          echo "触发说明: ${{ inputs.reason }}"
+          echo "folder_token: ${FEISHU_FOLDER_TOKEN:-DfQdfSxl2ld25wdx6Rxcub9hnDf (默认)}"
+          echo "CSV 输出:    ${CSV_FLAG:-比对_最新多出记录.csv (默认)}"
+
+          CMD="python madan/compare_madan_in_folder.py"
+          if [ -n "$FEISHU_FOLDER_TOKEN" ]; then CMD="$CMD --folder-token $FEISHU_FOLDER_TOKEN"; fi
+          if [ -n "$CSV_FLAG" ];           then CMD="$CMD --csv          $CSV_FLAG";           fi
+
+          echo "→ 执行: $CMD"
+          $CMD
+
+          CSV_FILE="${CSV_FLAG:-比对_最新多出记录.csv}"
+          if [ ! -f "$CSV_FILE" ]; then
+            echo "❌ CSV 未生成: $CSV_FILE"; exit 1
+          fi
+
+          # 统计新增数（去掉表头行）
+          ADDED=$(($(wc -l < "$CSV_FILE") - 1))
+          echo "新增捆包数: $ADDED"
+          echo "added_count=$ADDED"        >> $GITHUB_ENV
+          echo "csv_file=$CSV_FILE"        >> $GITHUB_ENV
+
+          # dry-run 预览前 3 行
+          echo "--- CSV 前 3 行预览 ---"
+          head -n 3 "$CSV_FILE"
+
+      - name: ④ CSV → 写入 Bitable（实际提交 commit=true 时）
+        if: success() && inputs.commit == 'true' && env.added_count != '0'
+        env:
+          FEISHU_APP_ID:     ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+        run: |
+          echo "=== 新增 ${added_count} 条 → 写入 采购订单明细汇总 (tblrhqzHuTsAprU3) ==="
+          python madan/iec_bundle-to-ruku.py --csv "${{ env.csv_file }}" --commit
+          echo "✅ 写入完成"
+
+      - name: ④ 干跑预览（commit=false 时）
+        if: success() && inputs.commit == 'false' && env.added_count != '0'
+        env:
+          FEISHU_APP_ID:     ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+        run: |
+          echo "=== 🧪 DRY-RUN：新增 ${added_count} 条映射预览，不落库 ==="
+          python madan/iec_bundle-to-ruku.py --csv "${{ env.csv_file }}"
+
+      - name: ④ 跳过（无新增）
+        if: success() && env.added_count == '0'
+        run: |
+          echo "✅ 云盘最新与次新码单捆包号完全一致，本次无新增 → 跳过写入 Bitable"
+
+      - name: 失败时告警
+        if: failure()
+        run: |
+          echo "::error::阶段2+3失败，请检查："
+          echo "  1. FEISHU_APP_ID / FEISHU_APP_SECRET 是否正确"
+          echo "  2. 飞书自建应用是否有 bitable:app 权限，且已添加为 Bitable 应用 OSuobf2ZkaWtUAsXEE9c3aBTnwh 的协作者"
+          echo "  3. 云盘里至少要有两个 码单_*.xlsx 才能比对（只有最新一份时会报错）"

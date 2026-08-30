@@ -35,6 +35,21 @@ iecc_*.json
 # --- Certification 本地工作产物（下载的 PDF / A17 输出 / 快照）
 Certification/_cert_work/
 
+# --- 本地调试脚本 / 逆向分析产物（_ 前缀约定，仅限仓库根目录）
+/_*.py
+/_*.js
+/_*.html
+/_*.json
+/_*.txt
+
+# --- 本地产物目录
+/_quality_certs/
+/Finance/
+
+# --- 脚本生成的带时间戳数据文件
+/码单_*.xlsx
+/准发下载_*.xlsx
+
 # --- OS
 Thumbs.db
 .DS_Store
