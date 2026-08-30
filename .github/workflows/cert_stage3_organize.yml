@@ -15,6 +15,7 @@ name: 质保书·③ 梳理 → Bitable「质保书」字段
 #   CERT_OK_FOLDER_TOKEN     新识别（源）文件夹              默认 VeXHfjiZqll255dgSOYcknbdnnf
 #   ARCHIVE_FOLDER_TOKEN     （可选）覆盖归档文件夹          默认 H24ifEj4alUBF6dzeioctPqinsf
 #   CERT_BAD_FOLDER_TOKEN    （可选）未识别文件夹（通知提示待人工识别数） 默认 Ic0Wf1PeelamrJd15GkcPo7Jnlb
+#   CERT_UNMATCHED_FOLDER_TOKEN （可选）未匹配文件夹（无法匹配资源号的件移送至此） 未配置则不移送
 #   PROGRESS_BITABLE_TOKEN   进度表 app_token                默认 Tz0XbQVzkaZuJasBwb8cRjkfnoe
 
 on:
@@ -101,6 +102,7 @@ jobs:
           CERT_OK_FOLDER_TOKEN: ${{ vars.CERT_OK_FOLDER_TOKEN || '' }}
           ARCHIVE_FOLDER_TOKEN: ${{ vars.ARCHIVE_FOLDER_TOKEN || '' }}
           CERT_BAD_FOLDER_TOKEN: ${{ vars.CERT_BAD_FOLDER_TOKEN || '' }}
+          CERT_UNMATCHED_FOLDER_TOKEN: ${{ vars.CERT_UNMATCHED_FOLDER_TOKEN || '' }}
           INPUT_RESOURCE: ${{ inputs.resource }}
           INPUT_ONLY_MATCHED: ${{ inputs.only_matched }}
           INPUT_MOVE_ARCHIVE: ${{ inputs.move_archive }}

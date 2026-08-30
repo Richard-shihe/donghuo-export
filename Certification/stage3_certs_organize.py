@@ -35,6 +35,7 @@
   BITABLE_APP_TOKEN / BITABLE_TABLE_ID / BITABLE_FIELD_CERT
   ARCHIVE_FOLDER_TOKEN        （可选）覆盖归档文件夹（默认 H24ifEj4alUBF6dzeioctPqinsf）
   CERT_BAD_FOLDER_TOKEN       （可选）覆盖未识别文件夹（默认 Ic0Wf1PeelamrJd15GkcPo7Jnlb）
+  CERT_UNMATCHED_FOLDER_TOKEN （可选）未匹配文件夹（无法匹配资源号的件移送至此；未配置则留在新识别）
   CERT_NOTIFY_UNION_IDS       汇报人员 union_id（逗号分隔；回退 FEISHU_UNION_IDS）
 """
 from __future__ import annotations
@@ -72,6 +73,7 @@ DEFAULT_APP_TOKEN = "Tz0XbQVzkaZuJasBwb8cRjkfnoe"
 DEFAULT_TABLE_ID = "tblvugnoJPS8GrpX"
 DEFAULT_ARCHIVE_FOLDER = "H24ifEj4alUBF6dzeioctPqinsf"  # 梳理成功后的归档文件夹
 DEFAULT_BAD_FOLDER = "Ic0Wf1PeelamrJd15GkcPo7Jnlb"      # 阶段②未识别文件夹（通知里提示待人工处理）
+DEFAULT_UNMATCHED_FOLDER = env("CERT_UNMATCHED_FOLDER_TOKEN", "")  # 未匹配文件夹（无法匹配资源号的件移送至此；未配置则不移送）
 FIELD_ZIYUANHAO = "资源号"
 FIELD_CERT = env("BITABLE_FIELD_CERT", "质保书")
 
@@ -216,6 +218,8 @@ def parse_args() -> argparse.Namespace:
                    help="禁用归档移动（处理完的文件留在新识别文件夹）")
     p.add_argument("--bad-folder", default=env("CERT_BAD_FOLDER_TOKEN", DEFAULT_BAD_FOLDER),
                    help=f"阶段②未识别文件夹（通知中提示待人工处理数量，默认 {DEFAULT_BAD_FOLDER}）")
+    p.add_argument("--unmatched-folder", default=env("CERT_UNMATCHED_FOLDER_TOKEN", DEFAULT_UNMATCHED_FOLDER),
+                   help="未匹配文件夹：无法匹配资源号的质保书移送至此（未配置则留在新识别文件夹）")
     p.add_argument("--only-matched", action="store_true",
                    help="只处理能匹配到 Bitable 资源号的文件")
     p.add_argument("--resource", default="",
@@ -322,6 +326,7 @@ def main() -> int:
         "files_uploaded": 0, "files_skipped_dup": 0, "files_failed": 0,
         "records_updated": 0,
         "files_moved": 0, "files_move_failed": 0,
+        "unmatched_moved": 0, "unmatched_move_failed": 0,
     }
     organized_names: set[str] = set()   # 已梳理文件名（上传成功或同名跳过）
     failed_items: set[str] = set()      # 处理失败明细（通知中突出显示）
@@ -418,6 +423,30 @@ def main() -> int:
                 summary["files_move_failed"] += 1
                 log(f"  [{moved_idx}] ❌ 移动失败 {fname}: {e}", log_file)
 
+    # 6.5 无法匹配资源号的文件 → 移送「未匹配」文件夹（含同名重复件；未配置文件夹则留在原地）
+    if unmatched and args.unmatched_folder:
+        log(f"\n[S6] 未匹配移送 → {args.unmatched_folder}", log_file)
+        unmatched_names = {f.get("name") or "" for f in unmatched}
+        moved_idx = 0
+        for f in files:
+            fname = f.get("name") or ""
+            ftok = f.get("token") or ""
+            if not fname or not ftok or fname not in unmatched_names:
+                continue
+            moved_idx += 1
+            if args.dry_run:
+                log(f"  [{moved_idx}] [dry-run] 将移动 {fname}", log_file)
+                summary["unmatched_moved"] += 1
+                continue
+            try:
+                move_file(token, ftok, args.unmatched_folder)
+                summary["unmatched_moved"] += 1
+                log(f"  [{moved_idx}] ✅ 移动 {fname}", log_file)
+                time.sleep(0.1)
+            except Exception as e:
+                summary["unmatched_move_failed"] += 1
+                log(f"  [{moved_idx}] ❌ 移动失败 {fname}: {e}", log_file)
+
     # 7. 汇报（未匹配/失败明细突出显示）
     elapsed = int(time.time() - t0)
     mins, secs = divmod(elapsed, 60)
@@ -438,8 +467,11 @@ def main() -> int:
         names = [f.get("name") or "?" for f in unmatched]
         shown = "\n".join(f"    · {n}" for n in names[:8])
         more = f"\n    · …等共 {len(names)} 个" if len(names) > 8 else ""
-        issues.append(f"  ❗ 以下 {len(names)} 个文件无法匹配资源号，未入库"
-                      f"（资源号提取失败，或表中无此资源号）：\n{shown}{more}")
+        tail = (f"\n   ⬆ 已移到「未匹配」文件夹: {folder_url(args.unmatched_folder)}"
+                f"\n   （核对资源号后放回新识别文件夹重跑本阶段，即可重新匹配入库）"
+                if args.unmatched_folder else "")
+        issues.append(f"  ❗ 以下 {len(names)} 个质保书无法匹配资源号，未入库"
+                      f"（资源号提取失败，或表中无此资源号）：{tail}\n{shown}{more}")
     if failed_items:
         uniq = sorted(failed_items)
         shown = "\n".join(f"    · {x}" for x in uniq[:8])
@@ -456,6 +488,8 @@ def main() -> int:
            f"更新记录: {summary['records_updated']} 次\n"
            f"目标表: {args.app_token} / {args.table_id}\n"
            + (f"归档移动: {summary['files_moved']}（失败 {summary['files_move_failed']}）\n" if move_enabled else "")
+           + (f"未匹配移送: {summary['unmatched_moved']}（失败 {summary['unmatched_move_failed']}）\n"
+              if args.unmatched_folder and (summary["unmatched_moved"] or summary["unmatched_move_failed"]) else "")
            + f"耗时: {mins}分{secs}秒"
            + (("\n\n⚠️ 待人工处理：\n" + "\n".join(issues)) if issues else "")
            + bad_hint)
