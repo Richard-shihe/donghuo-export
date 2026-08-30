@@ -11,7 +11,7 @@ name: 码单·阶段1 IEC 下载 → 飞书云盘
 #   - 外部定时服务触发（如 cron-job.org）
 #   - 想"只刷新码单数据"、暂不入库 Bitable
 #
-# 关联：madan/export_iec_madan.py
+# 关联：RUKU/export_iec_madan.py
 # ============================================================
 
 on:
@@ -90,7 +90,7 @@ jobs:
           echo "DRY_RUN   : ${DRY_RUN_FLAG}"
           echo "IBAO_USER : ${IBAO_USERNAME:0:3}***    FEISHU_APP: ${FEISHU_APP_ID:0:7}***"
 
-          CMD="python madan/export_iec_madan.py"
+          CMD="python RUKU/export_iec_madan.py"
           if [ "$DRY_RUN_FLAG" = "true" ]; then CMD="$CMD --dry-run"; fi
           if [ -n "$DATE_START_FLAG" ];      then CMD="$CMD --date-start $DATE_START_FLAG"; fi
           if [ -n "$DATE_END_FLAG" ];        then CMD="$CMD --date-end   $DATE_END_FLAG";   fi

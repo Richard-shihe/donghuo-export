@@ -45,13 +45,13 @@ IEC —— 入库管理：出厂码单 → 码单捆包下载 → 飞书云盘
   DELIVERY_MODE                        目前仅 'feishu'，即上传云盘（默认）
 
 命令行（建议从仓库根目录执行）：
-  python madan/export_iec_madan.py                     # 出厂日期近 5 天（含今日），自动上传
-  python madan/export_iec_madan.py --days 30          # 近 30 天
-  python madan/export_iec_madan.py --date-start 20260801 --date-end 20260821
-  python madan/export_iec_madan.py --dry-run          # 只下载不上传
-  python madan/export_iec_madan.py --no-upload        # 同上（等价 DRY_RUN=1）
+  python RUKU/export_iec_madan.py                     # 出厂日期近 5 天（含今日），自动上传
+  python RUKU/export_iec_madan.py --days 30          # 近 30 天
+  python RUKU/export_iec_madan.py --date-start 20260801 --date-end 20260821
+  python RUKU/export_iec_madan.py --dry-run          # 只下载不上传
+  python RUKU/export_iec_madan.py --no-upload        # 同上（等价 DRY_RUN=1）
 
-注：脚本现在位于 madan/ 子目录，但以下文件仍在仓库根目录（统一路径管理）：
+注：脚本现在位于 RUKU/ 子目录，但以下文件仍在仓库根目录（统一路径管理）：
   - ibaosteel_client.py（IEC 登录封装）
   - .env（环境变量）
   - iecc.json（IEC 登录 token 缓存，会写入 CWD 方便本地复用）
@@ -77,10 +77,10 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 # ============================================================
-# 路径定位：脚本在 madan/ 子目录，但 ibaosteel_client / .env 等在仓库根
+# 路径定位：脚本在 RUKU/ 子目录，但 ibaosteel_client / .env 等在仓库根
 #   无论从哪里执行，都确保能 import 到 ibaosteel_client，也能找到根目录 .env
 # ============================================================
-_HERE = Path(__file__).resolve().parent             # madan/
+_HERE = Path(__file__).resolve().parent             # RUKU/
 _REPO_ROOT = _HERE.parent                            # 仓库根
 # 把仓库根 + 脚本所在目录都加入 sys.path（兼顾根目录/子目录两种运行方式）
 for _p in (str(_REPO_ROOT), str(_HERE)):
@@ -382,7 +382,8 @@ def download_bundle(
               f"apiBean={DEFAULT_API_BEAN.split('.')[-1]}  "
               f"methodName={DEFAULT_METHOD_NAME}")
     t0 = time.time()
-    r2 = s.post(EXPORT_API, data=json.dumps(param), timeout=180,
+    # 15~30 天范围码单可达 60+ 条，IEC 同步生成 xlsx 可能超过 5 分钟，读超时放宽到 10 分钟
+    r2 = s.post(EXPORT_API, data=json.dumps(param), timeout=600,
                 headers={
                     "Content-Type": "application/json; charset=utf-8",
                     "Accept": "application/json, text/javascript, */*; q=0.01",
@@ -404,7 +405,7 @@ def download_bundle(
         print(f"       server_file = {server_file}  ({time.time()-t0:.1f}s)")
 
     dl_url = f"{DOWNLOAD_API}?fileName={urllib.parse.quote(server_file)}&delete=true"
-    r3 = s.get(dl_url, timeout=180, stream=True,
+    r3 = s.get(dl_url, timeout=600, stream=True,
                headers={"Referer": WEIGHTMEMO_PAGE})
     r3.raise_for_status()
 

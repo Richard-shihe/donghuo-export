@@ -13,7 +13,7 @@ name: 码单·全链路 下载 → 云盘 → 比对 → 写 Bitable
 #   ✅ 手动触发一次完整"补数"
 #
 # 什么时候用拆分的 workflow？
-#   🔘 只要例行下载 → madan_1_download.yml（已带内建 schedule，每 30 分钟自动跑）
+#   🔘 只要例行下载 → madan_1_download.yml（手动触发 / 外部定时服务触发）
 #   🔘 只要重新入库 → madan_2_compare_ruku.yml
 # ============================================================
 
@@ -96,7 +96,7 @@ jobs:
           echo "DRY_RUN   : ${DRY_RUN_FLAG}    to_bitable: ${{ inputs.to_bitable }}"
           echo "IBAO_USER : ${IBAO_USERNAME:0:3}***    FEISHU_APP: ${FEISHU_APP_ID:0:7}***"
 
-          CMD="python madan/export_iec_madan.py"
+          CMD="python RUKU/export_iec_madan.py"
           if [ "$DRY_RUN_FLAG" = "true" ]; then CMD="$CMD --dry-run"; fi
           if [ -n "$DATE_START_FLAG" ];      then CMD="$CMD --date-start $DATE_START_FLAG"; fi
           if [ -n "$DATE_END_FLAG" ];        then CMD="$CMD --date-end   $DATE_END_FLAG";   fi
@@ -139,7 +139,7 @@ jobs:
           FEISHU_APP_SECRET:   ${{ secrets.FEISHU_APP_SECRET }}
           FEISHU_FOLDER_TOKEN: ${{ vars.MADAN_FOLDER_TOKEN || '' }}
         run: |
-          CMD="python madan/compare_madan_in_folder.py"
+          CMD="python RUKU/compare_madan_in_folder.py"
           if [ -n "$FEISHU_FOLDER_TOKEN" ]; then CMD="$CMD --folder-token $FEISHU_FOLDER_TOKEN"; fi
           echo "→ 执行: $CMD"
           $CMD
@@ -159,7 +159,7 @@ jobs:
           FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
         run: |
           echo "新增 ${added_count} 条 → 写入 采购订单明细汇总 (tblrhqzHuTsAprU3)"
-          python madan/iec_bundle-to-ruku.py --csv 比对_最新多出记录.csv --commit
+          python RUKU/iec_bundle-to-ruku.py --csv 比对_最新多出记录.csv --commit
           echo "✅ 写入完成"
 
       - name: ④ 跳过（无新增）

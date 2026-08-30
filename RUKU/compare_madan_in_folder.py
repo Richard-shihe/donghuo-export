@@ -21,9 +21,9 @@ IEC 码单云盘比对 → 增量 CSV（阶段2 前置：2a 下载 + 2b 比对�
   FEISHU_APP_ID / FEISHU_APP_SECRET  飞书自建应用（需 drive:drive + 目标文件夹可编辑协作者）
 
 命令行（建议从仓库根目录执行）：
-  python madan/compare_madan_in_folder.py                        # 默认文件夹 + 默认 CSV 名
-  python madan/compare_madan_in_folder.py --csv out.csv         # 指定输出 CSV
-  python madan/compare_madan_in_folder.py --folder-token XXX    # 指定云盘文件夹
+  python RUKU/compare_madan_in_folder.py                        # 默认文件夹 + 默认 CSV 名
+  python RUKU/compare_madan_in_folder.py --csv out.csv         # 指定输出 CSV
+  python RUKU/compare_madan_in_folder.py --folder-token XXX    # 指定云盘文件夹
 """
 from __future__ import annotations
 
@@ -38,7 +38,7 @@ from pathlib import Path
 import requests
 
 # ============================================================
-# 路径定位：脚本位于 madan/，.env 在仓库根
+# 路径定位：脚本位于 RUKU/，.env 在仓库根
 # ============================================================
 _HERE = Path(__file__).resolve().parent
 _REPO_ROOT = _HERE.parent

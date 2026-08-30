@@ -13,18 +13,18 @@
 
 明细里已包含订单级信息（供应商/合同号/所属公司），无需分别查。
 
-运行:
+运行（建议从仓库根目录执行）:
   # 预览模式
-  python export_caigou_to_bitable.py --dry-run
+  python RUKU/export_caigou_to_bitable.py --dry-run
 
   # 实际执行
-  python export_caigou_to_bitable.py
+  python RUKU/export_caigou_to_bitable.py
 
   # 只拉最近 N 个订单（调试用）
-  python export_caigou_to_bitable.py --limit 5
+  python RUKU/export_caigou_to_bitable.py --limit 5
 
   # 跳过已入库的明细（入库操作=已足量）
-  python export_caigou_to_bitable.py --skip-ruku-done
+  python RUKU/export_caigou_to_bitable.py --skip-ruku-done
 
 环境变量:
   DH_USERNAME / DH_PASSWORD           懂火登录
@@ -46,7 +46,11 @@ from collections import defaultdict
 
 import requests
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# 脚本位于 RUKU/ 子目录，donghuo_login.py 在仓库根目录
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+for _p in (_REPO_ROOT, os.path.dirname(os.path.abspath(__file__))):
+    if _p and _p not in sys.path:
+        sys.path.insert(0, _p)
 from donghuo_login import login_donghuo
 
 

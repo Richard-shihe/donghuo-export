@@ -12,7 +12,7 @@ name: 码单·阶段2+3 云盘比对 → 增量写 Bitable
 #   - 阶段1 单独跑成功后，隔段时间再入库
 #   - 重跑入库（不想再拉一次 IEC，省验证码）
 #
-# 关联：madan/compare_madan_in_folder.py + madan/iec_bundle-to-ruku.py
+# 关联：RUKU/compare_madan_in_folder.py + RUKU/iec_bundle-to-ruku.py
 # ============================================================
 
 on:
@@ -77,7 +77,7 @@ jobs:
           echo "folder_token: ${FEISHU_FOLDER_TOKEN:-DfQdfSxl2ld25wdx6Rxcub9hnDf (默认)}"
           echo "CSV 输出:    ${CSV_FLAG:-比对_最新多出记录.csv (默认)}"
 
-          CMD="python madan/compare_madan_in_folder.py"
+          CMD="python RUKU/compare_madan_in_folder.py"
           if [ -n "$FEISHU_FOLDER_TOKEN" ]; then CMD="$CMD --folder-token $FEISHU_FOLDER_TOKEN"; fi
           if [ -n "$CSV_FLAG" ];           then CMD="$CMD --csv          $CSV_FLAG";           fi
 
@@ -106,7 +106,7 @@ jobs:
           FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
         run: |
           echo "=== 新增 ${added_count} 条 → 写入 采购订单明细汇总 (tblrhqzHuTsAprU3) ==="
-          python madan/iec_bundle-to-ruku.py --csv "${{ env.csv_file }}" --commit
+          python RUKU/iec_bundle-to-ruku.py --csv "${{ env.csv_file }}" --commit
           echo "✅ 写入完成"
 
       - name: ④ 干跑预览（commit=false 时）
@@ -116,7 +116,7 @@ jobs:
           FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
         run: |
           echo "=== 🧪 DRY-RUN：新增 ${added_count} 条映射预览，不落库 ==="
-          python madan/iec_bundle-to-ruku.py --csv "${{ env.csv_file }}"
+          python RUKU/iec_bundle-to-ruku.py --csv "${{ env.csv_file }}"
 
       - name: ④ 跳过（无新增）
         if: success() && env.added_count == '0'

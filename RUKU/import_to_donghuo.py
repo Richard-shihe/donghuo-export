@@ -10,18 +10,18 @@
   阶段1 (create, 默认)：创建采购订单 + 采购明细 + 提交审核
   阶段2 (ruku)        ：人工审核通过后，按捆包号入库
 
-运行方式:
+运行方式（建议从仓库根目录执行）:
   # 预览模式（DRY-RUN）
-  python import_to_donghuo.py --phase create --dry-run
+  python RUKU/import_to_donghuo.py --phase create --dry-run
 
   # 阶段1：创建订单+明细+提交审核
-  python import_to_donghuo.py --phase create
+  python RUKU/import_to_donghuo.py --phase create
 
   # 阶段2：入库（需人工审核通过后运行）
-  python import_to_donghuo.py --phase ruku
+  python RUKU/import_to_donghuo.py --phase ruku
 
   # 限制处理条数（调试用）
-  python import_to_donghuo.py --phase create --limit 5
+  python RUKU/import_to_donghuo.py --phase create --limit 5
 
 依赖环境变量:
   DH_USERNAME / DH_PASSWORD           懂火登录
@@ -44,7 +44,11 @@ from collections import defaultdict
 
 import requests
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# 脚本位于 RUKU/ 子目录，donghuo_login.py 在仓库根目录
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+for _p in (_REPO_ROOT, os.path.dirname(os.path.abspath(__file__))):
+    if _p and _p not in sys.path:
+        sys.path.insert(0, _p)
 from donghuo_login import login_donghuo
 
 
@@ -808,9 +812,9 @@ def parse_args():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
-  python import_to_donghuo.py --phase create --dry-run
-  python import_to_donghuo.py --phase create --limit 5
-  python import_to_donghuo.py --phase ruku --limit 5
+  python RUKU/import_to_donghuo.py --phase create --dry-run
+  python RUKU/import_to_donghuo.py --phase create --limit 5
+  python RUKU/import_to_donghuo.py --phase ruku --limit 5
 """)
     p.add_argument("--phase", choices=["create", "ruku", "all"],
                    default="create", help="执行阶段")

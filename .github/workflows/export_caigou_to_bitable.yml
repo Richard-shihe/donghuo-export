@@ -75,7 +75,7 @@ jobs:
           echo "[诊断] Python 版本:"
           python --version
           echo "[诊断] 开始运行脚本..."
-          python export_caigou_to_bitable.py $ARGS
+          python RUKU/export_caigou_to_bitable.py $ARGS
           EXIT_CODE=$?
           echo "脚本退出码: $EXIT_CODE"
           exit $EXIT_CODE

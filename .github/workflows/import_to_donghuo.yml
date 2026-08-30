@@ -72,7 +72,7 @@ jobs:
             export IMPORT_LIMIT="${{ inputs.limit }}"
           fi
           echo "最终参数: $ARGS"
-          python import_to_donghuo.py $ARGS
+          python RUKU/import_to_donghuo.py $ARGS
           EXIT_CODE=$?
           echo "脚本退出码: $EXIT_CODE"
           exit $EXIT_CODE
