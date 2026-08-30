@@ -20,20 +20,20 @@
   S2  拉目标表全量记录，构建 {资源号 → [record_id]} / {record_id → 已有附件}
   S3  文件名提取资源号（已知资源号最长前缀匹配 → 正则回退），按资源号分组
   S4  逐文件：下载 → 上传 bitable 附件 → 合并进「质保书」字段（追加，不覆盖）
-  S5  （可选 --move-to）把已梳理文件移动到归档文件夹
+  S5  把写入成功的文件移动到归档文件夹（上传成功 + 跳过重复；--no-move 关闭）
   S6  机器人汇报（cert_common.notify）
 
 用法：
   python stage3_certs_organize.py --dry-run            # 预演
   python stage3_certs_organize.py                      # 实际执行
   python stage3_certs_organize.py --resource L6ER000618  # 只处理指定资源号
-  python stage3_certs_organize.py --move-to H24ifEj4alUBF6dzeioctPqinsf  # 梳理后归档移动
+  python stage3_certs_organize.py --no-move          # 不做归档移动（默认会移）
 
 环境变量：
   FEISHU_APP_ID / FEISHU_APP_SECRET
   CERT_OK_FOLDER_TOKEN        源文件夹（默认 VeXHfjiZqll255dgSOYcknbdnnf）
   BITABLE_APP_TOKEN / BITABLE_TABLE_ID / BITABLE_FIELD_CERT
-  ARCHIVE_FOLDER_TOKEN        （可选）梳理后移动归档
+  ARCHIVE_FOLDER_TOKEN        （可选）覆盖归档文件夹（默认 H24ifEj4alUBF6dzeioctPqinsf）
   CERT_NOTIFY_UNION_IDS       汇报人员 union_id（逗号分隔；回退 FEISHU_UNION_IDS）
 """
 from __future__ import annotations
@@ -69,6 +69,7 @@ from cert_common import (  # noqa: E402
 DEFAULT_SOURCE_FOLDER = "VeXHfjiZqll255dgSOYcknbdnnf"
 DEFAULT_APP_TOKEN = "Tz0XbQVzkaZuJasBwb8cRjkfnoe"
 DEFAULT_TABLE_ID = "tblvugnoJPS8GrpX"
+DEFAULT_ARCHIVE_FOLDER = "H24ifEj4alUBF6dzeioctPqinsf"  # 梳理成功后的归档文件夹
 FIELD_ZIYUANHAO = "资源号"
 FIELD_CERT = env("BITABLE_FIELD_CERT", "质保书")
 
@@ -207,8 +208,10 @@ def parse_args() -> argparse.Namespace:
                    help=f"Bitable app_token（默认 {DEFAULT_APP_TOKEN}）")
     p.add_argument("--table-id", default=env("BITABLE_TABLE_ID", DEFAULT_TABLE_ID),
                    help=f"Bitable table_id（默认 {DEFAULT_TABLE_ID}）")
-    p.add_argument("--move-to", default=env("ARCHIVE_FOLDER_TOKEN", ""),
-                   help="（可选）梳理后把已梳理文件移动到归档文件夹 token")
+    p.add_argument("--move-to", default=env("ARCHIVE_FOLDER_TOKEN", DEFAULT_ARCHIVE_FOLDER),
+                   help=f"梳理成功后把文件移动到归档文件夹（默认 {DEFAULT_ARCHIVE_FOLDER}）")
+    p.add_argument("--no-move", action="store_true",
+                   help="禁用归档移动（处理完的文件留在已识别文件夹）")
     p.add_argument("--only-matched", action="store_true",
                    help="只处理能匹配到 Bitable 资源号的文件")
     p.add_argument("--resource", default="",
@@ -228,8 +231,11 @@ def main() -> int:
     log(f"  源文件夹: {args.source_folder}", log_file)
     log(f"  目标表:   {args.app_token} / {args.table_id}", log_file)
     log(f"  目标字段: {FIELD_CERT}", log_file)
-    if args.move_to:
-        log(f"  归档文件夹: {args.move_to}", log_file)
+    move_enabled = bool(args.move_to) and not args.no_move
+    if move_enabled:
+        log(f"  归档文件夹: {args.move_to}（写入成功后自动移动）", log_file)
+    else:
+        log("  归档移动: 已禁用（--no-move）", log_file)
     log(f"  模式:     {'dry-run（预演）' if args.dry_run else '实际执行'}", log_file)
 
     # 1. token
@@ -380,9 +386,9 @@ def main() -> int:
         else:
             summary["zy_fail"] += 1
 
-    # 6. （可选）移动已梳理文件到归档
-    if args.move_to:
-        log(f"\n[S5] 移动已梳理文件 → 归档文件夹 {args.move_to}", log_file)
+    # 6. 移动"写入成功"的文件到归档文件夹（上传成功 + 跳过重复；失败的留在已识别文件夹）
+    if move_enabled:
+        log(f"\n[S5] 归档移动 → {args.move_to}", log_file)
         log(f"  已梳理文件名 {len(organized_names)} 个（含同名重复）", log_file)
         moved_idx = 0
         for f in files:
@@ -414,7 +420,7 @@ def main() -> int:
            f" | 失败: {summary['files_failed']}\n"
            f"更新记录: {summary['records_updated']} 次\n"
            f"目标表: {args.app_token} / {args.table_id}\n"
-           + (f"归档移动: {summary['files_moved']}（失败 {summary['files_move_failed']}）\n" if args.move_to else "")
+           + (f"归档移动: {summary['files_moved']}（失败 {summary['files_move_failed']}）\n" if move_enabled else "")
            + f"耗时: {mins}分{secs}秒")
     print(msg)
     if not args.dry_run and not args.no_notify:

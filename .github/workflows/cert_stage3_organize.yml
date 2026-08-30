@@ -3,7 +3,7 @@ name: 质保书·③ 梳理 → Bitable「质保书」字段
 # 触发方式：Actions 页面手动 "Run workflow" 或 cron-job.org 外部触发
 # 流程：列已识别文件夹 → 按资源号匹配 Bitable 记录 →
 #        下载 → 上传 bitable 附件 → 合并追加到「质保书」字段（两层去重幂等）→
-#        （可选）把已梳理文件移动到归档文件夹
+#        写入成功的文件自动移动到归档文件夹（默认 H24ifEj4alUBF6dzeioctPqinsf，--no-move 可关）
 # 脚本：Certification/stage3_certs_organize.py
 #
 # GitHub Actions 需要的 Secrets：
@@ -13,7 +13,7 @@ name: 质保书·③ 梳理 → Bitable「质保书」字段
 #   FEISHU_UNION_IDS                    （回退）汇报人员 union_id
 # 可选 vars（未配置时脚本使用内置默认值）：
 #   CERT_OK_FOLDER_TOKEN     已识别（源）文件夹              默认 VeXHfjiZqll255dgSOYcknbdnnf
-#   ARCHIVE_FOLDER_TOKEN     （--move-to 时）归档文件夹     无默认（默认不移）
+#   ARCHIVE_FOLDER_TOKEN     （可选）覆盖归档文件夹          默认 H24ifEj4alUBF6dzeioctPqinsf
 #   PROGRESS_BITABLE_TOKEN   进度表 app_token                默认 Tz0XbQVzkaZuJasBwb8cRjkfnoe
 
 on:
@@ -36,13 +36,13 @@ on:
           - "true"
           - "false"
       move_archive:
-        description: "梳理完成后是否把已梳理文件移动到归档文件夹（true/false）"
+        description: "写入成功后是否自动移动到归档文件夹（默认 true，false 传 --no-move）"
         required: false
-        default: "false"
+        default: "true"
         type: choice
         options:
-          - "false"
           - "true"
+          - "false"
       dry_run:
         description: "dry-run：只列文件+匹配，不下载不上传不移动（true/false）"
         required: false
@@ -111,19 +111,19 @@ jobs:
           echo "FEISHU_APP_ID   : ${FEISHU_APP_ID:0:7}***"
           echo "BITABLE_APP     : ${BITABLE_APP_TOKEN} / ${BITABLE_TABLE_ID}"
           echo "源（已识别）    : ${CERT_OK_FOLDER_TOKEN:-VeXHfjiZqll255dgSOYcknbdnnf (默认)}"
-          echo "归档文件夹      : ${ARCHIVE_FOLDER_TOKEN:-(未配置，move_archive=true 时请配置 vars.ARCHIVE_FOLDER_TOKEN)}"
+          echo "归档文件夹      : ${ARCHIVE_FOLDER_TOKEN:-H24ifEj4alUBF6dzeioctPqinsf (脚本默认)}"
 
           CMD="python Certification/stage3_certs_organize.py"
           [ -n "${INPUT_RESOURCE}" ] && CMD="$CMD --resource ${INPUT_RESOURCE}"
           [ "${INPUT_ONLY_MATCHED}" = "true" ] && CMD="$CMD --only-matched"
-          [ "${INPUT_MOVE_ARCHIVE}" = "true" ] && [ -n "${ARCHIVE_FOLDER_TOKEN}" ] && \
-            CMD="$CMD --move-to ${ARCHIVE_FOLDER_TOKEN}"
+          if [ "${INPUT_MOVE_ARCHIVE}" = "true" ]; then
+            # vars 配置了归档文件夹则显式覆盖；未配置则用脚本内置默认 H24ifEj4alUBF6dzeioctPqinsf
+            [ -n "${ARCHIVE_FOLDER_TOKEN}" ] && CMD="$CMD --move-to ${ARCHIVE_FOLDER_TOKEN}"
+          else
+            CMD="$CMD --no-move"
+          fi
           [ "${DRY_RUN_FLAG}" = "true" ] && CMD="$CMD --dry-run"
           [ "${NO_NOTIFY_FLAG}" = "true" ] && CMD="$CMD --no-notify"
-
-          if [ "${INPUT_MOVE_ARCHIVE}" = "true" ] && [ -z "${ARCHIVE_FOLDER_TOKEN}" ]; then
-            echo "::warning:: move_archive=true 但 vars.ARCHIVE_FOLDER_TOKEN 未配置，将跳过归档移动。"
-          fi
 
           echo "执行命令: $CMD"
           $CMD
@@ -149,4 +149,4 @@ jobs:
           echo "::warning::   - 飞书自建应用是否已添加为已识别文件夹「可编辑」协作者"
           echo "::warning::   - 飞书自建应用是否有 bitable:app 权限 + 进度表「可编辑」协作者"
           echo "::warning::   - 目标字段（质保书）在多维表的字段权限中已对该应用授权可写"
-          echo "::warning::   - 归档移动时确保 ARCHIVE_FOLDER_TOKEN vars 已配置"
+          echo "::warning::   - 归档移动默认开启，确保应用对归档文件夹（默认 H24ifEj4alUBF6dzeioctPqinsf）有「可编辑」协作者权限"
