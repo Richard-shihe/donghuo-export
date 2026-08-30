@@ -11,10 +11,9 @@ Certification 公共模块：飞书云盘 API + 机器人汇报
 
 汇报（机器人）：
   优先级：1. 私信  2. 群 Webhook  3. 仅打日志
-  汇报人员环境变量：
-    CERT_NOTIFY_UNION_IDS        逗号/分号/空格分隔（本流程专用，优先）
-    FEISHU_UNION_IDS             （回退）
-    （都未配置时用内置默认收件人 DEFAULT_NOTIFY_IDS，同结案流程）
+  汇报人员环境变量（不配则不发私信）：
+    CERT_NOTIFY_UNION_IDS        逗号/分号/空格分隔（质保书流程专用，优先）
+    FEISHU_UNION_IDS             （回退，全仓库通用名单）
   ID 前缀自动识别 receive_id_type：on_→union_id / oc_→open_id / ou_→user_id / @→email
     CERT_NOTIFY_WEBHOOK_URL      （可选）覆盖 FEISHU_WEBHOOK_URL
     FEISHU_WEBHOOK_SECRET        （可选）Webhook 签名密钥
@@ -47,9 +46,6 @@ for _stream in (sys.stdout, sys.stderr):
 FEISHU_OPEN_BASE = "https://open.feishu.cn/open-apis"
 NO_PROXY = {"http": None, "https": None}
 
-# 内置默认汇报收件人（同结案流程 export_IEC_jiean，已验证可达）；
-# 可用 CERT_NOTIFY_UNION_IDS / FEISHU_UNION_IDS 覆盖
-DEFAULT_NOTIFY_IDS = "on_93da40c6314edbfa2dc3e031ef405389 on_b09bcbf3e74f5d423900aa9b2f00eb63"
 DRIVE_WEB_BASE = "https://s2v31ke6sl.feishu.cn/drive"
 
 
@@ -262,8 +258,6 @@ def _feishu_sign(secret: str, ts: str) -> str:
 
 def _notify_union_ids() -> list[str]:
     raw = env("CERT_NOTIFY_UNION_IDS") or env("FEISHU_UNION_IDS")
-    if not raw:
-        raw = DEFAULT_NOTIFY_IDS   # 未配置时用内置默认收件人（同结案流程，已验证可达）
     if not raw:
         return []
     return [p for p in re.split(r"[\s,，;；]+", raw.strip()) if p]
