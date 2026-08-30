@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-阶段1 · IEC 质保书 PDF 下载 → 上传「原始件」飞书文件夹
+阶段1 · IEC 质保书 PDF 下载 → 上传「原件」飞书文件夹
 ======================================================
 
 流程：
@@ -9,7 +9,7 @@
   S1  分页查询质保书列表（queryCertificate，交货期月份过滤 + 质保书日期倒序）
   S2  逐行 decryptByCertificateInfo → 新 RSA + customerId
   S3  Playwright 一体化下载（IEC SSO → ICSC Vue → 点下载图标 → save）
-  S4  原始件 PDF 上传到「待识别」文件夹（同名跳过，幂等）
+  S4  原件 PDF 上传到「待处理」文件夹（同名跳过，幂等）
   S5  机器人汇报（cert_common.notify）
 
 交期可选（三选一，或交互式）：
@@ -33,7 +33,7 @@
 环境变量：
   IBAO_USERNAME / IBAO_PASSWORD        IEC 账密
   FEISHU_APP_ID   / FEISHU_APP_SECRET  飞书自建应用
-  CERT_RAW_FOLDER_TOKEN                待识别文件夹（默认 YIrbf0NzlloFNKdYAjvcL6gXnhe）
+  CERT_RAW_FOLDER_TOKEN                待处理文件夹（默认 YIrbf0NzlloFNKdYAjvcL6gXnhe）
   CERT_NOTIFY_UNION_IDS                汇报人员 union_id（逗号分隔；回退 FEISHU_UNION_IDS）
 """
 from __future__ import annotations
@@ -89,7 +89,7 @@ FORM_FIELDS = {
     "smartSegNo": "QE000000",
 }
 
-DEFAULT_RAW_FOLDER = "YIrbf0NzlloFNKdYAjvcL6gXnhe"   # 待识别（原始件）
+DEFAULT_RAW_FOLDER = "YIrbf0NzlloFNKdYAjvcL6gXnhe"   # 待处理（原件）
 
 WORK_DIR = _CERT_DIR / "_cert_work"
 WORK_DIR.mkdir(parents=True, exist_ok=True)   # CI 全新 checkout 无此目录，必须先建
@@ -521,7 +521,7 @@ async def _pw_download_all(token: str, decrypted_rows: list[dict],
 
 
 # ============================================================
-# S4: 原始件上传（同名跳过）
+# S4: 原件上传（同名跳过）
 # ============================================================
 def stage_upload_raw(token: str, raw_folder: str, downloaded: list[dict],
                      *, log_file: Optional[Path] = None) -> list[dict]:
@@ -529,7 +529,7 @@ def stage_upload_raw(token: str, raw_folder: str, downloaded: list[dict],
     try:
         existing = {f.get("name") or "" for f in list_folder_files(token, raw_folder)}
     except Exception as e:
-        log(f"  ⚠️ 列待识别文件夹失败（不去重直接传）: {e}", log_file)
+        log(f"  ⚠️ 列待处理文件夹失败（不去重直接传）: {e}", log_file)
     oks = skipped = failed = 0
     for i, d in enumerate(downloaded, 1):
         fp = Path(d["raw_pdf"])
@@ -544,7 +544,7 @@ def stage_upload_raw(token: str, raw_folder: str, downloaded: list[dict],
             d["feishu_file_token"] = ft
             d["feishu_folder"] = raw_folder
             oks += 1
-            log(f"  [{i}/{len(downloaded)}] ✅ 上传原始件 {name} → {ft}", log_file)
+            log(f"  [{i}/{len(downloaded)}] ✅ 上传原件 {name} → {ft}", log_file)
         except Exception as e:
             failed += 1
             log(f"  [{i}/{len(downloaded)}] ❌ 上传失败 {name}: {e}", log_file)
@@ -558,7 +558,7 @@ def stage_upload_raw(token: str, raw_folder: str, downloaded: list[dict],
 # ============================================================
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="阶段1 · IEC 质保书 PDF 下载 → 上传「原始件」飞书文件夹",
+        description="阶段1 · IEC 质保书 PDF 下载 → 上传「原件」飞书文件夹",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("--preset", choices=["today", "week", "month", "month3"], default=None,
@@ -577,7 +577,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--workers", type=int, default=4,
                    help="并发下载页面数（同一浏览器内并行，默认 4；服务端限流时可调小）")
     p.add_argument("--raw-folder", default=env("CERT_RAW_FOLDER_TOKEN", DEFAULT_RAW_FOLDER),
-                   help=f"原始件（待识别）文件夹 token（默认 {DEFAULT_RAW_FOLDER}）")
+                   help=f"原件（待处理）文件夹 token（默认 {DEFAULT_RAW_FOLDER}）")
     p.add_argument("--dry-run", action="store_true",
                    help="登录+查询+decrypt，不下载不上传不汇报")
     p.add_argument("--no-notify", action="store_true", help="跳过机器人汇报")
@@ -590,10 +590,10 @@ def main() -> int:
     log_file = WORK_DIR / f'stage1_{time.strftime("%Y%m%d_%H%M%S")}.log'
     date_from, date_to = resolve_date_range(args)
 
-    log("========== 【阶段1】IEC 质保书下载 → 原始件文件夹 ==========", log_file)
+    log("========== 【阶段1】IEC 质保书下载 → 原件文件夹 ==========", log_file)
     log(f"  交期范围: {date_from} ~ {date_to} (YYYYMM, preset={args.preset})", log_file)
     log(f"  最多条数: {args.max}   每页: {args.page_size}   并发: {args.workers}", log_file)
-    log(f"  待识别文件夹: {args.raw_folder}", log_file)
+    log(f"  待处理文件夹: {args.raw_folder}", log_file)
     log(f"  dry_run: {args.dry_run}", log_file)
 
     # S0 登录
@@ -649,8 +649,8 @@ def main() -> int:
         log("  ❌ 0 份下载成功", log_file)
         return 4
 
-    # S4 原始件上传
-    log("\n[S4] 原始件上传 → 待识别文件夹", log_file)
+    # S4 原件上传
+    log("\n[S4] 原件上传 → 待处理文件夹", log_file)
     try:
         ftok = tenant_access_token()
     except Exception as e:
@@ -666,7 +666,7 @@ def main() -> int:
     msg = (f"【质保书·①IEC下载】完成 ✅\n"
            f"交期范围: {date_from} ~ {date_to}\n"
            f"列表 {len(rows)} 条 | decrypt {len(decrypted)} | 下载 {len(downloaded)}\n"
-           f"上传原始件: {n_up}" + (f"（同名跳过 {n_skip}）" if n_skip else "") + "\n"
+           f"上传原件: {n_up}" + (f"（同名跳过 {n_skip}）" if n_skip else "") + "\n"
            f"文件夹: {folder_url(args.raw_folder)}\n"
            f"耗时: {mins}分{secs}秒")
     print(msg)

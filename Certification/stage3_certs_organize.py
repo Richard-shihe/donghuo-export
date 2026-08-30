@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-阶段3 · 梳理「已识别」文件夹质保书 → 写 Bitable「质保书」附件字段
+阶段3 · 梳理「新识别」文件夹质保书 → 写 Bitable「质保书」附件字段
 ==================================================================
 
-以「资源号」为唯一号，把已识别文件夹里的质保书逐条挂到多维表对应记录：
+以「资源号」为唯一号，把新识别文件夹里的质保书逐条挂到多维表对应记录：
 
   源文件夹  VeXHfjiZqll255dgSOYcknbdnnf（阶段2 识别成功产出）
   目标表    Bitable app_token=Tz0XbQVzkaZuJasBwb8cRjkfnoe
@@ -201,11 +201,11 @@ def extract_resource_number(filename: str, known_zys: set[str]) -> str:
 # ============================================================
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="阶段3 · 梳理已识别质保书 → Bitable「质保书」附件字段",
+        description="阶段3 · 梳理新识别质保书 → Bitable「质保书」附件字段",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("--source-folder", default=env("CERT_OK_FOLDER_TOKEN", DEFAULT_SOURCE_FOLDER),
-                   help=f"源云盘文件夹（已识别，默认 {DEFAULT_SOURCE_FOLDER}）")
+                   help=f"源云盘文件夹（新识别，默认 {DEFAULT_SOURCE_FOLDER}）")
     p.add_argument("--app-token", default=env("BITABLE_APP_TOKEN", DEFAULT_APP_TOKEN),
                    help=f"Bitable app_token（默认 {DEFAULT_APP_TOKEN}）")
     p.add_argument("--table-id", default=env("BITABLE_TABLE_ID", DEFAULT_TABLE_ID),
@@ -213,7 +213,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--move-to", default=env("ARCHIVE_FOLDER_TOKEN", DEFAULT_ARCHIVE_FOLDER),
                    help=f"梳理成功后把文件移动到归档文件夹（默认 {DEFAULT_ARCHIVE_FOLDER}）")
     p.add_argument("--no-move", action="store_true",
-                   help="禁用归档移动（处理完的文件留在已识别文件夹）")
+                   help="禁用归档移动（处理完的文件留在新识别文件夹）")
     p.add_argument("--bad-folder", default=env("CERT_BAD_FOLDER_TOKEN", DEFAULT_BAD_FOLDER),
                    help=f"阶段②未识别文件夹（通知中提示待人工处理数量，默认 {DEFAULT_BAD_FOLDER}）")
     p.add_argument("--only-matched", action="store_true",
@@ -395,7 +395,7 @@ def main() -> int:
         else:
             summary["zy_fail"] += 1
 
-    # 6. 移动"写入成功"的文件到归档文件夹（上传成功 + 跳过重复；失败的留在已识别文件夹）
+    # 6. 移动"写入成功"的文件到归档文件夹（上传成功 + 跳过重复；失败的留在新识别文件夹）
     if move_enabled:
         log(f"\n[S5] 归档移动 → {args.move_to}", log_file)
         log(f"  已梳理文件名 {len(organized_names)} 个（含同名重复）", log_file)

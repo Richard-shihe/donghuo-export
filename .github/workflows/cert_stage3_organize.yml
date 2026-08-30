@@ -1,7 +1,7 @@
 name: 质保书·③ 梳理 → Bitable「质保书」字段
 
 # 触发方式：Actions 页面手动 "Run workflow" 或 cron-job.org 外部触发
-# 流程：列已识别文件夹 → 按资源号匹配 Bitable 记录 →
+# 流程：列新识别文件夹 → 按资源号匹配 Bitable 记录 →
 #        下载 → 上传 bitable 附件 → 合并追加到「质保书」字段（两层去重幂等）→
 #        写入成功的文件自动移动到归档文件夹（默认 H24ifEj4alUBF6dzeioctPqinsf，--no-move 可关）
 # 脚本：Certification/stage3_certs_organize.py
@@ -12,7 +12,7 @@ name: 质保书·③ 梳理 → Bitable「质保书」字段
 #   CERT_NOTIFY_UNION_IDS               （可选）汇报人员 ID；未配置回退 FEISHU_UNION_IDS → 脚本内置默认（同结案流程）
 #   FEISHU_UNION_IDS                    （回退）汇报人员 ID；ID 前缀自动识别 on_/oc_/ou_
 # 可选 vars（未配置时脚本使用内置默认值）：
-#   CERT_OK_FOLDER_TOKEN     已识别（源）文件夹              默认 VeXHfjiZqll255dgSOYcknbdnnf
+#   CERT_OK_FOLDER_TOKEN     新识别（源）文件夹              默认 VeXHfjiZqll255dgSOYcknbdnnf
 #   ARCHIVE_FOLDER_TOKEN     （可选）覆盖归档文件夹          默认 H24ifEj4alUBF6dzeioctPqinsf
 #   CERT_BAD_FOLDER_TOKEN    （可选）未识别文件夹（通知提示待人工识别数） 默认 Ic0Wf1PeelamrJd15GkcPo7Jnlb
 #   PROGRESS_BITABLE_TOKEN   进度表 app_token                默认 Tz0XbQVzkaZuJasBwb8cRjkfnoe
@@ -85,7 +85,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: 执行阶段③：列已识别文件夹 → 匹配资源号 → 写 Bitable「质保书」字段
+      - name: 执行阶段③：列新识别文件夹 → 匹配资源号 → 写 Bitable「质保书」字段
         env:
           TZ: "Asia/Shanghai"
           FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
@@ -112,7 +112,7 @@ jobs:
           echo "move_archive: ${INPUT_MOVE_ARCHIVE}    dry_run: ${DRY_RUN_FLAG}    no_notify: ${NO_NOTIFY_FLAG}"
           echo "FEISHU_APP_ID   : ${FEISHU_APP_ID:0:7}***"
           echo "BITABLE_APP     : ${BITABLE_APP_TOKEN} / ${BITABLE_TABLE_ID}"
-          echo "源（已识别）    : ${CERT_OK_FOLDER_TOKEN:-VeXHfjiZqll255dgSOYcknbdnnf (默认)}"
+          echo "源（新识别）    : ${CERT_OK_FOLDER_TOKEN:-VeXHfjiZqll255dgSOYcknbdnnf (默认)}"
           echo "归档文件夹      : ${ARCHIVE_FOLDER_TOKEN:-H24ifEj4alUBF6dzeioctPqinsf (脚本默认)}"
 
           CMD="python Certification/stage3_certs_organize.py"
@@ -148,7 +148,7 @@ jobs:
         run: |
           echo "::warning:: 阶段③流程失败，请检查以下项目："
           echo "::warning::   - FEISHU_APP_ID / FEISHU_APP_SECRET 是否正确"
-          echo "::warning::   - 飞书自建应用是否已添加为已识别文件夹「可编辑」协作者"
+          echo "::warning::   - 飞书自建应用是否已添加为新识别文件夹「可编辑」协作者"
           echo "::warning::   - 飞书自建应用是否有 bitable:app 权限 + 进度表「可编辑」协作者"
           echo "::warning::   - 目标字段（质保书）在多维表的字段权限中已对该应用授权可写"
           echo "::warning::   - 归档移动默认开启，确保应用对归档文件夹（默认 H24ifEj4alUBF6dzeioctPqinsf）有「可编辑」协作者权限"

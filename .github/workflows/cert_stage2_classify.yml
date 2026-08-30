@@ -1,8 +1,8 @@
 name: 质保书·② A17 识别分类 → 归档
 
 # 触发方式：Actions 页面手动 "Run workflow" 或 cron-job.org 外部触发
-# 流程：拉取待识别文件夹 → 下载 → 本地 A17 识别 →
-#          识别成功 → 已识别文件夹
+# 流程：拉取待处理文件夹 → 下载 → 本地 A17 识别 →
+#          识别成功 → 新识别文件夹
 #          未识别   → 未识别文件夹
 #        全部原件 → 归档文件夹
 # 脚本：Certification/stage2_certs_classify.py
@@ -13,10 +13,10 @@ name: 质保书·② A17 识别分类 → 归档
 #   CERT_NOTIFY_UNION_IDS               （可选）汇报人员 ID；未配置回退 FEISHU_UNION_IDS → 脚本内置默认（同结案流程）
 #   FEISHU_UNION_IDS                    （回退）汇报人员 ID；ID 前缀自动识别 on_/oc_/ou_
 # 可选 vars（未配置时脚本使用内置默认值）：
-#   CERT_RAW_FOLDER_TOKEN        待识别文件夹（原始件） 默认 YIrbf0NzlloFNKdYAjvcL6gXnhe
-#   CERT_OK_FOLDER_TOKEN         已识别文件夹            默认 VeXHfjiZqll255dgSOYcknbdnnf
+#   CERT_RAW_FOLDER_TOKEN        待处理文件夹（原件） 默认 YIrbf0NzlloFNKdYAjvcL6gXnhe
+#   CERT_OK_FOLDER_TOKEN         新识别文件夹            默认 VeXHfjiZqll255dgSOYcknbdnnf
 #   CERT_BAD_FOLDER_TOKEN        未识别文件夹            默认 Ic0Wf1PeelamrJd15GkcPo7Jnlb
-#   CERT_ARCHIVE_FOLDER_TOKEN    原件归档文件夹          默认 HfYCfYMZnlhVpFdKI82cTHQ5npb
+#   CERT_ARCHIVE_FOLDER_TOKEN    已处理文件夹          默认 HfYCfYMZnlhVpFdKI82cTHQ5npb
 
 on:
   workflow_dispatch:
@@ -72,7 +72,7 @@ jobs:
           # A17 依赖 pdfplumber + rapidocr-onnxruntime（requirements 当前未列，显式装以防缺失）
           pip install pdfplumber rapidocr-onnxruntime || true
 
-      - name: 执行阶段②：下载待识别 → A17 分类 → 上传已识别/未识别 → 归档
+      - name: 执行阶段②：下载待处理 → A17 分类 → 上传新识别/未识别 → 归档
         env:
           TZ: "Asia/Shanghai"
           FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
@@ -94,8 +94,8 @@ jobs:
           echo "触发说明: ${{ inputs.reason }}"
           echo "limit: ${INPUT_LIMIT}    dry_run: ${DRY_RUN_FLAG}    no_notify: ${NO_NOTIFY_FLAG}"
           echo "FEISHU_APP_ID : ${FEISHU_APP_ID:0:7}***"
-          echo "RAW 待识别    : ${CERT_RAW_FOLDER_TOKEN:-YIrbf0NzlloFNKdYAjvcL6gXnhe (默认)}"
-          echo "OK  已识别    : ${CERT_OK_FOLDER_TOKEN:-VeXHfjiZqll255dgSOYcknbdnnf (默认)}"
+          echo "RAW 待处理    : ${CERT_RAW_FOLDER_TOKEN:-YIrbf0NzlloFNKdYAjvcL6gXnhe (默认)}"
+          echo "OK  新识别    : ${CERT_OK_FOLDER_TOKEN:-VeXHfjiZqll255dgSOYcknbdnnf (默认)}"
           echo "BAD 未识别    : ${CERT_BAD_FOLDER_TOKEN:-Ic0Wf1PeelamrJd15GkcPo7Jnlb (默认)}"
           echo "归档          : ${CERT_ARCHIVE_FOLDER_TOKEN:-HfYCfYMZnlhVpFdKI82cTHQ5npb (默认)}"
 
@@ -125,5 +125,5 @@ jobs:
         run: |
           echo "::warning:: 阶段②流程失败，请检查以下项目："
           echo "::warning::   - FEISHU_APP_ID / FEISHU_APP_SECRET 是否正确"
-          echo "::warning::   - 飞书自建应用是否已添加为 待识别/已识别/未识别/归档 四个文件夹「可编辑」协作者"
+          echo "::warning::   - 飞书自建应用是否已添加为 待处理/新识别/未识别/归档 四个文件夹「可编辑」协作者"
           echo "::warning::   - A17 依赖是否完整（pdfplumber、rapidocr-onnxruntime 已显式安装）"

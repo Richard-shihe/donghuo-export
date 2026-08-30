@@ -1,7 +1,7 @@
-name: 质保书·① IEC 下载 → 原始件待识别文件夹
+name: 质保书·① IEC 下载 → 原件待处理文件夹
 
 # 触发方式：Actions 页面手动 "Run workflow" 或 cron-job.org 外部触发
-# 流程：IEC 登录 → 按交期查询 → decrypt → Playwright 一体化下载 PDF → 飞书云盘原始件文件夹
+# 流程：IEC 登录 → 按交期查询 → decrypt → Playwright 一体化下载 PDF → 飞书云盘原件文件夹
 # 脚本：Certification/stage1_certs_download.py
 #
 # GitHub Actions 需要的 Secrets：
@@ -11,7 +11,7 @@ name: 质保书·① IEC 下载 → 原始件待识别文件夹
 #   CERT_NOTIFY_UNION_IDS               （可选）汇报人员 ID；未配置回退 FEISHU_UNION_IDS → 脚本内置默认（同结案流程）
 #   FEISHU_UNION_IDS                    （回退）汇报人员 ID；ID 前缀自动识别 on_/oc_/ou_
 # 可选 vars：
-#   CERT_RAW_FOLDER_TOKEN               原始件（待识别）文件夹；未配置时脚本默认 YIrbf0NzlloFNKdYAjvcL6gXnhe
+#   CERT_RAW_FOLDER_TOKEN               原件（待处理）文件夹；未配置时脚本默认 YIrbf0NzlloFNKdYAjvcL6gXnhe
 
 on:
   workflow_dispatch:
@@ -19,7 +19,7 @@ on:
       reason:
         description: "手动触发说明（可选）"
         required: false
-        default: "手动立即执行质保书阶段①：IEC 下载 → 原始件文件夹"
+        default: "手动立即执行质保书阶段①：IEC 下载 → 原件文件夹"
       preset:
         description: "交期快捷档（不带其他参数时使用）：today 当日 / week 近7天 / month 当月 / month3 近3个月"
         required: false
@@ -70,7 +70,7 @@ concurrency:
 
 jobs:
   cert-stage1-download:
-    name: 阶段① IEC 下载 → 原始件待识别
+    name: 阶段① IEC 下载 → 原件待处理
     runs-on: ubuntu-latest
     timeout-minutes: 45   # Playwright 逐条下载，按 50 条 × 30s 留余量
 
@@ -92,7 +92,7 @@ jobs:
         run: |
           python -m playwright install chromium --with-deps
 
-      - name: 执行阶段①：IEC 登录 → 下载 → 上传原始件
+      - name: 执行阶段①：IEC 登录 → 下载 → 上传原件
         env:
           TZ: "Asia/Shanghai"
           IBAO_USERNAME: ${{ secrets.IBAO_USERNAME }}
@@ -157,5 +157,5 @@ jobs:
           echo "::warning:: 阶段①流程失败，请检查以下项目："
           echo "::warning::   - IBAO_USERNAME / IBAO_PASSWORD 是否仍可用（登录/验证码）"
           echo "::warning::   - FEISHU_APP_ID / FEISHU_APP_SECRET 是否正确"
-          echo "::warning::   - 飞书自建应用是否已添加为原始件文件夹「可编辑」协作者"
+          echo "::warning::   - 飞书自建应用是否已添加为原件文件夹「可编辑」协作者"
           echo "::warning::   - CERT_RAW_FOLDER_TOKEN vars 是否指向正确文件夹"

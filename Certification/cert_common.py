@@ -5,8 +5,8 @@ Certification 公共模块：飞书云盘 API + 机器人汇报
 ==================================================
 
 被三个阶段脚本共用：
-  stage1_download.py   IEC 下载 → 原始件文件夹
-  stage2_classify.py   A17 识别分类 → 已识别/未识别文件夹 → 原件归档
+  stage1_download.py   IEC 下载 → 原件文件夹
+  stage2_classify.py   A17 识别分类 → 新识别/未识别文件夹 → 已处理
   stage3_organize.py   梳理 → 写 Bitable「质保书」附件字段
 
 汇报（机器人）：
