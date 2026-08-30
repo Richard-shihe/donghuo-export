@@ -75,6 +75,7 @@ FIELD_CERT = env("BITABLE_FIELD_CERT", "质保书")
 UPLOAD_SLEEP = 0.25  # 素材上传 QPS 5，保守间隔
 
 WORK_DIR = _CERT_DIR / "_cert_work"
+WORK_DIR.mkdir(parents=True, exist_ok=True)   # CI 全新 checkout 无此目录，必须先建
 
 # 已知资源号模式：X6E0016009 / L4E0006973 / L6ER000579
 ZY_REGEX = re.compile(r'^([A-Z]\d+[A-Z]{1,3}\d{3,})')

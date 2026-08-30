@@ -92,6 +92,7 @@ FORM_FIELDS = {
 DEFAULT_RAW_FOLDER = "YIrbf0NzlloFNKdYAjvcL6gXnhe"   # 待识别（原始件）
 
 WORK_DIR = _CERT_DIR / "_cert_work"
+WORK_DIR.mkdir(parents=True, exist_ok=True)   # CI 全新 checkout 无此目录，必须先建
 PDF_DIR = WORK_DIR / "pdfs"
 PDF_DIR.mkdir(parents=True, exist_ok=True)
 

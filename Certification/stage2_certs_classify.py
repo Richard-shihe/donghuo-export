@@ -68,6 +68,7 @@ DEFAULT_BAD_FOLDER = "Ic0Wf1PeelamrJd15GkcPo7Jnlb"      # 未识别
 DEFAULT_ARCHIVE_FOLDER = "HfYCfYMZnlhVpFdKI82cTHQ5npb"  # 原件归档
 
 WORK_DIR = _CERT_DIR / "_cert_work"
+WORK_DIR.mkdir(parents=True, exist_ok=True)   # CI 全新 checkout 无此目录，必须先建
 RAW_DIR = WORK_DIR / "raw"
 A17_OUT_DIR = WORK_DIR / "a17_output"
 A17_FRESH_DIR = WORK_DIR / "a17_fresh"
