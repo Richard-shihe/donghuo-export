@@ -8,8 +8,8 @@ name: 质保书·① IEC 下载 → 原始件待识别文件夹
 #   IBAO_USERNAME / IBAO_PASSWORD       欧冶/IEC 账密（dddDocr 过验证码）
 #   FEISHU_APP_ID / FEISHU_APP_SECRET   飞书自建应用（需 drive:drive + 文件夹「可编辑」协作者）
 #   FEISHU_NOTIFY_APP_SECRET            （可选）发私信专用应用 Secret
-#   CERT_NOTIFY_UNION_IDS               （可选，优先）汇报人员 union_id，逗号分隔；未配置回退 FEISHU_UNION_IDS
-#   FEISHU_UNION_IDS                    （回退）汇报人员 union_id
+#   CERT_NOTIFY_UNION_IDS               （可选）汇报人员 ID；未配置回退 FEISHU_UNION_IDS → 脚本内置默认（同结案流程）
+#   FEISHU_UNION_IDS                    （回退）汇报人员 ID；ID 前缀自动识别 on_/oc_/ou_
 # 可选 vars：
 #   CERT_RAW_FOLDER_TOKEN               原始件（待识别）文件夹；未配置时脚本默认 YIrbf0NzlloFNKdYAjvcL6gXnhe
 

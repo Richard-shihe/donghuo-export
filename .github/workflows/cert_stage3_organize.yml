@@ -9,8 +9,8 @@ name: 质保书·③ 梳理 → Bitable「质保书」字段
 # GitHub Actions 需要的 Secrets：
 #   FEISHU_APP_ID / FEISHU_APP_SECRET   飞书自建应用（drive:drive + bitable:app + 文件夹/表格「可编辑」协作者）
 #   FEISHU_NOTIFY_APP_SECRET            （可选）发私信专用应用 Secret
-#   CERT_NOTIFY_UNION_IDS               （可选，优先）汇报人员 union_id；未配置回退 FEISHU_UNION_IDS
-#   FEISHU_UNION_IDS                    （回退）汇报人员 union_id
+#   CERT_NOTIFY_UNION_IDS               （可选）汇报人员 ID；未配置回退 FEISHU_UNION_IDS → 脚本内置默认（同结案流程）
+#   FEISHU_UNION_IDS                    （回退）汇报人员 ID；ID 前缀自动识别 on_/oc_/ou_
 # 可选 vars（未配置时脚本使用内置默认值）：
 #   CERT_OK_FOLDER_TOKEN     已识别（源）文件夹              默认 VeXHfjiZqll255dgSOYcknbdnnf
 #   ARCHIVE_FOLDER_TOKEN     （可选）覆盖归档文件夹          默认 H24ifEj4alUBF6dzeioctPqinsf

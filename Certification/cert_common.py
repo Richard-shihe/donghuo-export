@@ -10,10 +10,12 @@ Certification 公共模块：飞书云盘 API + 机器人汇报
   stage3_organize.py   梳理 → 写 Bitable「质保书」附件字段
 
 汇报（机器人）：
-  优先级：1. union_id 私信  2. 群 Webhook  3. 仅打日志
+  优先级：1. 私信  2. 群 Webhook  3. 仅打日志
   汇报人员环境变量：
-    CERT_NOTIFY_UNION_IDS        逗号/分号分隔 union_id（本流程专用，优先）
-    （未配置时回退 FEISHU_UNION_IDS）
+    CERT_NOTIFY_UNION_IDS        逗号/分号/空格分隔（本流程专用，优先）
+    FEISHU_UNION_IDS             （回退）
+    （都未配置时用内置默认收件人 DEFAULT_NOTIFY_IDS，同结案流程）
+  ID 前缀自动识别 receive_id_type：on_→union_id / oc_→open_id / ou_→user_id / @→email
     CERT_NOTIFY_WEBHOOK_URL      （可选）覆盖 FEISHU_WEBHOOK_URL
     FEISHU_WEBHOOK_SECRET        （可选）Webhook 签名密钥
     NOTIFY_APP_ID / NOTIFY_APP_SECRET  发私信用应用（回退 FEISHU_APP_ID/SECRET）
@@ -44,6 +46,10 @@ for _stream in (sys.stdout, sys.stderr):
 
 FEISHU_OPEN_BASE = "https://open.feishu.cn/open-apis"
 NO_PROXY = {"http": None, "https": None}
+
+# 内置默认汇报收件人（同结案流程 export_IEC_jiean，已验证可达）；
+# 可用 CERT_NOTIFY_UNION_IDS / FEISHU_UNION_IDS 覆盖
+DEFAULT_NOTIFY_IDS = "on_93da40c6314edbfa2dc3e031ef405389 on_b09bcbf3e74f5d423900aa9b2f00eb63"
 DRIVE_WEB_BASE = "https://s2v31ke6sl.feishu.cn/drive"
 
 
@@ -257,8 +263,27 @@ def _feishu_sign(secret: str, ts: str) -> str:
 def _notify_union_ids() -> list[str]:
     raw = env("CERT_NOTIFY_UNION_IDS") or env("FEISHU_UNION_IDS")
     if not raw:
+        raw = DEFAULT_NOTIFY_IDS   # 未配置时用内置默认收件人（同结案流程，已验证可达）
+    if not raw:
         return []
     return [p for p in re.split(r"[\s,，;；]+", raw.strip()) if p]
+
+
+def _id_type(oid: str) -> str:
+    """按 ID 前缀自动判断 receive_id_type（与结案流程 iec_jiean_to_bitable 一致）：
+    oc_ → open_id / on_ → union_id / ou_ → user_id / 含@ → email / 其他 → open_id
+    """
+    if not oid:
+        return "open_id"
+    if oid.startswith("oc_"):
+        return "open_id"
+    if oid.startswith("on_"):
+        return "union_id"
+    if oid.startswith("ou_"):
+        return "user_id"
+    if "@" in oid:
+        return "email"
+    return "open_id"
 
 
 def notify(message: str) -> dict:
@@ -279,7 +304,7 @@ def notify(message: str) -> dict:
                             f"{FEISHU_OPEN_BASE}/im/v1/messages",
                             headers={"Authorization": f"Bearer {tok}",
                                      "Content-Type": "application/json; charset=utf-8"},
-                            params={"receive_id_type": "union_id"},
+                            params={"receive_id_type": _id_type(oid)},
                             json={"receive_id": oid, "msg_type": "text",
                                   "content": json.dumps({"text": message}, ensure_ascii=False)},
                             timeout=15, proxies=NO_PROXY,
@@ -293,7 +318,7 @@ def notify(message: str) -> dict:
                         stat["fail"] += 1
                         print(f"[通知·私信] 异常: {e}", flush=True)
                     time.sleep(0.15)
-                stat["channel"] = "union_id-dm"
+                stat["channel"] = "dm"
                 return stat
             except Exception as e:
                 print(f"[通知·私信] 拿 token 失败，降级 Webhook: {e}", flush=True)
