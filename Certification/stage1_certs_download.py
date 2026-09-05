@@ -90,6 +90,7 @@ FORM_FIELDS = {
 }
 
 DEFAULT_RAW_FOLDER = "YIrbf0NzlloFNKdYAjvcL6gXnhe"   # 待处理（原件）
+DEFAULT_PROCESSED_FOLDER = "HfYCfYMZnlhVpFdKI82cTHQ5npb"  # 已处理（stage2 原件归档，增量去重依据）
 
 WORK_DIR = _CERT_DIR / "_cert_work"
 WORK_DIR.mkdir(parents=True, exist_ok=True)   # CI 全新 checkout 无此目录，必须先建
@@ -578,6 +579,10 @@ def parse_args() -> argparse.Namespace:
                    help="并发下载页面数（同一浏览器内并行，默认 4；服务端限流时可调小）")
     p.add_argument("--raw-folder", default=env("CERT_RAW_FOLDER_TOKEN", DEFAULT_RAW_FOLDER),
                    help=f"原件（待处理）文件夹 token（默认 {DEFAULT_RAW_FOLDER}）")
+    p.add_argument("--processed-folder", default=env("CERT_PROCESSED_FOLDER_TOKEN", DEFAULT_PROCESSED_FOLDER),
+                   help=f"已处理文件夹 token（stage2 原件归档，增量去重依据，默认 {DEFAULT_PROCESSED_FOLDER}）")
+    p.add_argument("--no-incremental", action="store_true",
+                   help="关闭增量去重（强制重新下载全部，默认按质保书号跳过已下载的）")
     p.add_argument("--dry-run", action="store_true",
                    help="登录+查询+decrypt，不下载不上传不汇报")
     p.add_argument("--no-notify", action="store_true", help="跳过机器人汇报")
@@ -637,8 +642,55 @@ def main() -> int:
         log("  ❌ decrypt 全失败，结束", log_file)
         return 2
 
+    # S2.5 增量去重：已在「待处理/已处理」文件夹的质保书（按质保书号文件名）不再下载
+    # 说明：stage2 跑完后待处理会清空、原件进「已处理」，所以两个文件夹都要查，
+    # 否则每天都会把交期窗口内的同一批质保书重复下载一遍。
+    n_exist = 0
+    n_decrypted_total = len(decrypted)
+    if args.no_incremental:
+        log("\n[S2.5] 增量去重已关闭（--no-incremental），将下载全部", log_file)
+    else:
+        log("\n[S2.5] 增量去重：扫描 待处理 + 已处理 文件夹", log_file)
+        already_names: set[str] = set()
+        try:
+            ftok = tenant_access_token()
+            for fld, label in ((args.raw_folder, "待处理"),
+                               (args.processed_folder, "已处理")):
+                if not fld:
+                    continue
+                try:
+                    names = {f.get("name") or "" for f in list_folder_files(ftok, fld)}
+                    log(f"  {label}文件夹已有 {len(names)} 个文件", log_file)
+                    already_names |= names
+                except Exception as e:
+                    log(f"  ⚠️ 列{label}文件夹失败（该文件夹不参与去重）: {e}", log_file)
+            if already_names:
+                kept = [r for r in decrypted
+                        if f'{r["tcNumTc"]}.pdf' not in already_names
+                        and f'{r["tcNumTc"]}.zip' not in already_names]
+                n_exist = len(decrypted) - len(kept)
+                decrypted = kept
+                log(f"  增量结果：{n_exist} 条已下载过 → 跳过；本次新增 {len(decrypted)} 条", log_file)
+        except Exception as e:
+            log(f"  ⚠️ 取飞书 token 失败，本次不做增量去重: {e}", log_file)
+
     if args.dry_run:
-        log("\n[dry-run] 停在 decrypt，不执行下载/上传/汇报", log_file)
+        log(f"\n[dry-run] 停在下载前：列表 {len(rows)} | decrypt {n_decrypted_total} | "
+            f"新增待下载 {len(decrypted)} | 已存在跳过 {n_exist}", log_file)
+        return 0
+
+    if not decrypted:
+        elapsed = int(time.time() - t0)
+        mins, secs = divmod(elapsed, 60)
+        log("  ✅ 无新增质保书（窗口内全部已下载过），结束", log_file)
+        msg = (f"【质保书·①IEC下载】完成 ✅\n"
+               f"交期范围: {date_from} ~ {date_to}\n"
+               f"列表 {len(rows)} 条 | decrypt {n_decrypted_total}\n"
+               f"新增下载: 0（{n_exist} 条均已下载过，跳过）\n"
+               f"耗时: {mins}分{secs}秒")
+        print(msg)
+        if not args.no_notify:
+            notify(msg)
         return 0
 
     # S3 Playwright 一体化下载（并发）
@@ -665,7 +717,8 @@ def main() -> int:
     n_skip = sum(1 for d in downloaded if d.get("upload_skipped"))
     msg = (f"【质保书·①IEC下载】完成 ✅\n"
            f"交期范围: {date_from} ~ {date_to}\n"
-           f"列表 {len(rows)} 条 | decrypt {len(decrypted)} | 下载 {len(downloaded)}\n"
+           f"列表 {len(rows)} 条 | decrypt {n_decrypted_total} | 新增 {len(downloaded)}"
+           f"（已存在跳过 {n_exist}）\n"
            f"上传原件: {n_up}" + (f"（同名跳过 {n_skip}）" if n_skip else "") + "\n"
            f"文件夹: {folder_url(args.raw_folder)}\n"
            f"耗时: {mins}分{secs}秒")

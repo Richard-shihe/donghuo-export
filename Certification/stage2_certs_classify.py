@@ -52,7 +52,7 @@ for _p in (str(_CERT_DIR), str(_CERT_DIR.parent)):
 
 from cert_common import (  # noqa: E402
     env, log, notify, tenant_access_token, list_folder_files,
-    download_file, upload_to_folder, move_file, folder_url,
+    download_file, upload_to_folder, move_file, delete_file, folder_url,
 )
 from A17 import (  # noqa: E402
     process_one as a17_process_one,
@@ -235,6 +235,7 @@ def main() -> int:
         "failed": 0,         # 下载/上传失败
         "moved": 0,
         "move_failed": 0,
+        "dup_deleted": 0,    # 归档时发现目标已有同名 → 源为重复件，直接删除
     }
     items: list[dict] = []
 
@@ -317,11 +318,25 @@ def main() -> int:
 
     # 4. 原件移送归档（含同名重复、含处理失败的）
     #    只移"本次已处理"的文件；--limit 截断时，未处理文件留在待处理文件夹
+    #    归档文件夹已有同名 → 源文件是重复下载件，直接删除（飞书云盘允许同名共存，move 会产生重复堆积）
     processed_names = {f.get("name") or "" for f in unique_list}
     log(f"\n[S3] 原件移送归档 → {args.archive_folder}", log_file)
+    archive_existing: set[str] = set()
+    if not args.dry_run:
+        try:
+            archive_existing = {f.get("name") or ""
+                                for f in list_folder_files(token, args.archive_folder)}
+            log(f"  归档文件夹已有 {len(archive_existing)} 个文件（同名件将直接删除不重复归档）", log_file)
+        except Exception as e:
+            log(f"  ⚠️ 列归档文件夹失败（按移动处理）: {e}", log_file)
     if args.dry_run:
-        will_move = sum(1 for f in files if (f.get("name") or "") in processed_names)
-        log(f"  [dry-run] 将移送 {will_move} 个文件", log_file)
+        will_move = sum(1 for f in files
+                        if (f.get("name") or "") in processed_names
+                        and (f.get("name") or "") not in archive_existing)
+        will_del = sum(1 for f in files
+                       if (f.get("name") or "") in processed_names
+                       and (f.get("name") or "") in archive_existing)
+        log(f"  [dry-run] 将移送 {will_move} 个，重复件删除 {will_del} 个", log_file)
         summary["moved"] = 0
     else:
         for i, f in enumerate(files, 1):
@@ -330,14 +345,20 @@ def main() -> int:
             if not name or not ftok or name not in processed_names:
                 continue
             try:
-                move_file(token, ftok, args.archive_folder)
-                summary["moved"] += 1
-                log(f"  [{i}/{len(files)}] ✅ 移送 {name}", log_file)
+                if name in archive_existing:
+                    delete_file(token, ftok)
+                    summary["dup_deleted"] += 1
+                    log(f"  [{i}/{len(files)}] 🗑 归档已有同名，删除重复件 {name}", log_file)
+                else:
+                    move_file(token, ftok, args.archive_folder)
+                    archive_existing.add(name)
+                    summary["moved"] += 1
+                    log(f"  [{i}/{len(files)}] ✅ 移送 {name}", log_file)
             except Exception as e:
                 summary["move_failed"] += 1
-                log(f"  [{i}/{len(files)}] ❌ 移送失败 {name}: {e}", log_file)
+                log(f"  [{i}/{len(files)}] ❌ 移送/删除失败 {name}: {e}", log_file)
             time.sleep(MOVE_SLEEP)
-        log(f"  移送完成：成功 {summary['moved']}，失败 {summary['move_failed']}", log_file)
+        log(f"  完成：移送 {summary['moved']}，重复删除 {summary['dup_deleted']}，失败 {summary['move_failed']}", log_file)
 
     # 5. 汇报
     elapsed = int(time.time() - t0)
@@ -349,7 +370,8 @@ def main() -> int:
            f"未识别: {summary['bad_src']} 份 → 上传原件"
            + (f"（同名跳过 {summary['skip_bad_dup']}）" if summary["skip_bad_dup"] else "") + "\n"
            f"原件移送归档: {summary['moved']}"
-           + (f"（失败 {summary['move_failed']}）" if summary["move_failed"] else "") + "\n"
+           + (f"（失败 {summary['move_failed']}）" if summary["move_failed"] else "")
+           + (f"，重复件删除 {summary['dup_deleted']}" if summary["dup_deleted"] else "") + "\n"
            f"新识别: {folder_url(args.ok_folder)}\n"
            f"未识别: {folder_url(args.bad_folder)}\n"
            f"归档: {folder_url(args.archive_folder)}\n"

@@ -172,6 +172,17 @@ def move_file(token: str, file_token: str, target_folder: str) -> dict:
     return d.get("data") or {}
 
 
+def delete_file(token: str, file_token: str, file_type: str = "file") -> dict:
+    """删除云盘文件（用于清理重复件）。"""
+    url = f"{FEISHU_OPEN_BASE}/drive/v1/files/{file_token}"
+    r = requests.delete(url, headers={"Authorization": f"Bearer {token}"},
+                        params={"type": file_type}, timeout=30, proxies=NO_PROXY)
+    d = r.json()
+    if d.get("code") != 0:
+        raise RuntimeError(f"删除文件失败 {file_token}: code={d.get('code')} msg={d.get('msg')}")
+    return d.get("data") or {}
+
+
 # ============================================================
 # Bitable（阶段3用）
 # ============================================================

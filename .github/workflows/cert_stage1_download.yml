@@ -106,6 +106,7 @@ jobs:
           CERT_NOTIFY_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL || '' }}
           FEISHU_WEBHOOK_SECRET: ${{ secrets.FEISHU_WEBHOOK_SECRET || '' }}
           CERT_RAW_FOLDER_TOKEN: ${{ vars.CERT_RAW_FOLDER_TOKEN || '' }}
+          CERT_PROCESSED_FOLDER_TOKEN: ${{ vars.CERT_PROCESSED_FOLDER_TOKEN || '' }}
           INPUT_PRESET: ${{ inputs.preset }}
           INPUT_DAYS: ${{ inputs.days }}
           INPUT_DATE_FROM: ${{ inputs.date_from }}

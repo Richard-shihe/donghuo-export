@@ -62,7 +62,7 @@ for _p in (str(_CERT_DIR), str(_CERT_DIR.parent)):
 from cert_common import (  # noqa: E402
     env, log, notify, tenant_access_token, list_folder_files,
     list_bitable_records, download_file, upload_bitable_media,
-    update_record_field, move_file, folder_url,
+    update_record_field, move_file, delete_file, folder_url,
 )
 
 # ============================================================
@@ -325,8 +325,8 @@ def main() -> int:
         "zy_ok": 0, "zy_fail": 0,
         "files_uploaded": 0, "files_skipped_dup": 0, "files_failed": 0,
         "records_updated": 0,
-        "files_moved": 0, "files_move_failed": 0,
-        "unmatched_moved": 0, "unmatched_move_failed": 0,
+        "files_moved": 0, "files_move_failed": 0, "files_dup_deleted": 0,
+        "unmatched_moved": 0, "unmatched_move_failed": 0, "unmatched_dup_deleted": 0,
     }
     organized_names: set[str] = set()   # 已梳理文件名（上传成功或同名跳过）
     failed_items: set[str] = set()      # 处理失败明细（通知中突出显示）
@@ -401,9 +401,18 @@ def main() -> int:
             summary["zy_fail"] += 1
 
     # 6. 移动"写入成功"的文件到归档文件夹（上传成功 + 跳过重复；失败的留在新识别文件夹）
+    #    归档已有同名 → 源是重复件，直接删除（飞书云盘允许同名共存，move 会重复堆积）
     if move_enabled:
         log(f"\n[S5] 归档移动 → {args.move_to}", log_file)
         log(f"  已梳理文件名 {len(organized_names)} 个（含同名重复）", log_file)
+        archive_existing: set[str] = set()
+        if not args.dry_run:
+            try:
+                archive_existing = {f.get("name") or ""
+                                    for f in list_folder_files(token, args.move_to)}
+                log(f"  归档文件夹已有 {len(archive_existing)} 个文件（同名件将直接删除）", log_file)
+            except Exception as e:
+                log(f"  ⚠️ 列归档文件夹失败（按移动处理）: {e}", log_file)
         moved_idx = 0
         for f in files:
             fname = f.get("name") or ""
@@ -412,21 +421,35 @@ def main() -> int:
                 continue
             moved_idx += 1
             if args.dry_run:
-                log(f"  [{moved_idx}] [dry-run] 将移动 {fname}", log_file)
+                action = "删除重复件" if fname in archive_existing else "移动"
+                log(f"  [{moved_idx}] [dry-run] 将{action} {fname}", log_file)
                 continue
             try:
-                move_file(token, ftok, args.move_to)
-                summary["files_moved"] += 1
-                log(f"  [{moved_idx}] ✅ 移动 {fname}", log_file)
+                if fname in archive_existing:
+                    delete_file(token, ftok)
+                    summary["files_dup_deleted"] += 1
+                    log(f"  [{moved_idx}] 🗑 归档已有同名，删除重复件 {fname}", log_file)
+                else:
+                    move_file(token, ftok, args.move_to)
+                    archive_existing.add(fname)
+                    summary["files_moved"] += 1
+                    log(f"  [{moved_idx}] ✅ 移动 {fname}", log_file)
                 time.sleep(0.1)
             except Exception as e:
                 summary["files_move_failed"] += 1
-                log(f"  [{moved_idx}] ❌ 移动失败 {fname}: {e}", log_file)
+                log(f"  [{moved_idx}] ❌ 移动/删除失败 {fname}: {e}", log_file)
 
     # 6.5 无法匹配资源号的文件 → 移送「未匹配」文件夹（含同名重复件；未配置文件夹则留在原地）
     if unmatched and args.unmatched_folder:
         log(f"\n[S6] 未匹配移送 → {args.unmatched_folder}", log_file)
         unmatched_names = {f.get("name") or "" for f in unmatched}
+        unmatched_existing: set[str] = set()
+        if not args.dry_run:
+            try:
+                unmatched_existing = {f.get("name") or ""
+                                      for f in list_folder_files(token, args.unmatched_folder)}
+            except Exception:
+                unmatched_existing = set()
         moved_idx = 0
         for f in files:
             fname = f.get("name") or ""
@@ -439,9 +462,15 @@ def main() -> int:
                 summary["unmatched_moved"] += 1
                 continue
             try:
-                move_file(token, ftok, args.unmatched_folder)
-                summary["unmatched_moved"] += 1
-                log(f"  [{moved_idx}] ✅ 移动 {fname}", log_file)
+                if fname in unmatched_existing:
+                    delete_file(token, ftok)
+                    summary["unmatched_dup_deleted"] += 1
+                    log(f"  [{moved_idx}] 🗑 未匹配文件夹已有同名，删除重复件 {fname}", log_file)
+                else:
+                    move_file(token, ftok, args.unmatched_folder)
+                    unmatched_existing.add(fname)
+                    summary["unmatched_moved"] += 1
+                    log(f"  [{moved_idx}] ✅ 移动 {fname}", log_file)
                 time.sleep(0.1)
             except Exception as e:
                 summary["unmatched_move_failed"] += 1
@@ -487,9 +516,13 @@ def main() -> int:
            f" | 失败: {summary['files_failed']}\n"
            f"更新记录: {summary['records_updated']} 次\n"
            f"目标表: {args.app_token} / {args.table_id}\n"
-           + (f"归档移动: {summary['files_moved']}（失败 {summary['files_move_failed']}）\n" if move_enabled else "")
-           + (f"未匹配移送: {summary['unmatched_moved']}（失败 {summary['unmatched_move_failed']}）\n"
-              if args.unmatched_folder and (summary["unmatched_moved"] or summary["unmatched_move_failed"]) else "")
+           + (f"归档移动: {summary['files_moved']}（失败 {summary['files_move_failed']}）"
+              + (f"，重复件删除 {summary['files_dup_deleted']}" if summary["files_dup_deleted"] else "") + "\n"
+              if move_enabled else "")
+           + (f"未匹配移送: {summary['unmatched_moved']}（失败 {summary['unmatched_move_failed']}）"
+              + (f"，重复件删除 {summary['unmatched_dup_deleted']}" if summary["unmatched_dup_deleted"] else "") + "\n"
+              if args.unmatched_folder and (summary["unmatched_moved"] or summary["unmatched_move_failed"]
+                                            or summary["unmatched_dup_deleted"]) else "")
            + f"耗时: {mins}分{secs}秒"
            + (("\n\n⚠️ 待人工处理：\n" + "\n".join(issues)) if issues else "")
            + bad_hint)
