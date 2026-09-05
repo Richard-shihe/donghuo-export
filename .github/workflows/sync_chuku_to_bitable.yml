@@ -1,0 +1,61 @@
+name: 懂火出库记录 → 飞书多维表同步
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "手动触发说明（可选）"
+        required: false
+        default: "手动立即触发"
+
+# 并发控制：同一时刻只跑一个实例
+concurrency:
+  group: sync-chuku-to-bitable
+  cancel-in-progress: false
+
+jobs:
+  sync-chuku:
+    name: 登录懂火 → 导出库记录 → 清空+写入飞书多维表 → 通知洪
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 安装 Python 依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 安装 Playwright Chromium
+        run: |
+          python -m playwright install chromium --with-deps
+
+      - name: 运行同步脚本
+        env:
+          # ===== 懂火系统账号（仓库 Secrets） =====
+          DH_USERNAME: ${{ secrets.DH_USERNAME }}
+          DH_PASSWORD: ${{ secrets.DH_PASSWORD }}
+
+          # ===== 飞书自建应用（仓库 Secrets） =====
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+
+          # 时区
+          TZ: "Asia/Shanghai"
+        run: |
+          python 懂火出库同步/sync_chuku_to_bitable.py --headless
+          EXIT_CODE=$?
+          echo "脚本退出码: $EXIT_CODE"
+          exit $EXIT_CODE
+
+      - name: 失败时告警
+        if: failure()
+        run: |
+          echo "::warning:: 懂火出库同步失败，请检查 Secrets 配置（DH_USERNAME/DH_PASSWORD/FEISHU_APP_ID/FEISHU_APP_SECRET）或懂火网站状态"

@@ -10,8 +10,9 @@
   4. pandas 解析 → 转 CSV（UTF-8-SIG）落本地备份
   5. 清空飞书多维表 tblolnj06JZkYNiU 现有全部记录
   6. 按原字段格式批量写入新数据
+  7. 发送飞书通知给洪（更新条数、耗时等摘要）
 
-使用：python sync_chuku_to_bitable.py
+使用：python sync_chuku_to_bitable.py [--headless] [--skip-download] [--dry-run] [--no-notify]
 凭据：仓库根目录 .env 里的 DH_USERNAME / DH_PASSWORD + 系统环境变量 FEISHU_APP_ID / FEISHU_APP_SECRET
 """
 import sys, os, json, time, datetime, argparse, traceback, math, requests
@@ -38,6 +39,9 @@ CSV_DIR.mkdir(exist_ok=True)
 
 FEISHU_OPEN_BASE = "https://open.feishu.cn/open-apis"
 BATCH_SIZE = 500    # 飞书 bitable batch_create/batch_delete 上限
+
+# 同步完成后飞书通知（默认发给 洪 on_b09bcbf3e74f5d423900aa9b2f00eb63）
+FEISHU_NOTIFY_UNION_ID = "on_b09bcbf3e74f5d423900aa9b2f00eb63"
 
 # ===== 多维表字段类型映射（2026-09-05 API 探测）=====
 # ftype: 1=Text, 2=Number, 5=DateTime(毫秒时间戳)
@@ -85,10 +89,10 @@ def log(msg: str):
 
 def feishu_token() -> str:
     """获取飞书 tenant_access_token（每次现取，2 小时有效期）"""
-    app_id = os.environ.get("FEISHU_APP_ID", "").strip()
-    app_secret = os.environ.get("FEISHU_APP_SECRET", "").strip()
+    app_id = os.environ.get("FEISHU_APP_ID") or os.environ.get("FEISHU_NOTIFY_APP_ID", "").strip()
+    app_secret = os.environ.get("FEISHU_APP_SECRET") or os.environ.get("FEISHU_NOTIFY_APP_SECRET", "").strip()
     if not app_id or not app_secret:
-        raise RuntimeError("缺少 FEISHU_APP_ID / FEISHU_APP_SECRET 环境变量")
+        raise RuntimeError("缺少 FEISHU_APP_ID / FEISHU_APP_SECRET（或 FEISHU_NOTIFY_APP_ID / NOTIFY_APP_SECRET）环境变量")
     r = requests.post(
         f"{FEISHU_OPEN_BASE}/auth/v3/tenant_access_token/internal",
         json={"app_id": app_id, "app_secret": app_secret},
@@ -102,6 +106,23 @@ def feishu_token() -> str:
 
 def env(name: str) -> str:
     return os.environ.get(name, "").strip()
+
+
+def feishu_send_text(union_id: str, text: str, token: str):
+    """通过飞书机器人给指定用户发纯文本消息"""
+    url = f"{FEISHU_OPEN_BASE}/im/v1/messages?receive_id_type=union_id"
+    h = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    body = {
+        "receive_id": union_id,
+        "msg_type": "text",
+        "content": json.dumps({"text": text}, ensure_ascii=False),
+    }
+    r = requests.post(url, headers=h, json=body, timeout=15)
+    data = r.json()
+    if data.get("code") != 0:
+        log(f"[飞书通知] ❌ 发送失败: code={data.get('code')} msg={data.get('msg')}")
+    else:
+        log(f"[飞书通知] ✅ 已发送给 {union_id}")
 
 
 # ============ 懂火 → 下载 xls ============
@@ -255,7 +276,8 @@ def download_chuku_xls(headless: bool = False) -> Path:
 def xls_to_clean_df(xls_path: Path):
     """
     解析懂火导出的 HTML 格式 xls → 返回 DataFrame（第 0 行为表头已跳过，列名已正确设置）。
-    同时落一份 UTF-8-SIG CSV 到 csv_backup/。
+    同时落一份 UTF-8-SIG CSV 到 csv_backup/（上传成功后由调用方删除）。
+    返回 (DataFrame, csv_path)。
     """
     import pandas as pd
     df_raw = pd.read_html(str(xls_path))[0]
@@ -272,7 +294,7 @@ def xls_to_clean_df(xls_path: Path):
     csv_path = CSV_DIR / f"chuku_export_{now}.csv"
     df.to_csv(csv_path, index=False, encoding="utf-8-sig")
     log(f"[备份] CSV 已保存: {csv_path}")
-    return df
+    return df, csv_path
 
 
 # ============ 飞书多维表：清空 + 写入 ============
@@ -406,6 +428,7 @@ def main():
     ap.add_argument("--skip-upload", action="store_true", help="跳过写入多维表（只下载+转 CSV）")
     ap.add_argument("--download-only", action="store_true", help="等价 --skip-upload --skip-clear")
     ap.add_argument("--dry-run", action="store_true", help="下载+转 CSV+打印前几行，不碰飞书")
+    ap.add_argument("--no-notify", action="store_true", help="不发送飞书通知（默认同步完成会通知洪）")
     args = ap.parse_args()
 
     t0 = time.time()
@@ -422,7 +445,7 @@ def main():
         xls_path = download_chuku_xls(headless=args.headless)
 
     # ---- Step 2: 解析 ----
-    df = xls_to_clean_df(xls_path)
+    df, csv_path = xls_to_clean_df(xls_path)
     if len(df) == 0:
         log("[警告] 导出文件为空，中止")
         return 1
@@ -457,6 +480,7 @@ def main():
         log("[飞书] 跳过清空（--skip-clear）")
 
     if not args.skip_upload:
+        total_written = 0
         log(f"[飞书] Step B: 写入 {len(df)} 条新记录 ...")
         records = df_to_bitable_records(df)
         # 先小批量试一条，验证字段类型没问题
@@ -477,11 +501,31 @@ def main():
             bitable_batch_create(token, remaining)
         total_written = len(test_batch) + len(remaining)
         log(f"[飞书] ✅ 全部写入完成，共 {total_written} 条")
+        # 上传成功后删除 CSV 备份
+        if csv_path.exists():
+            csv_path.unlink()
+            log(f"[清理] CSV 已删除: {csv_path.name}")
     else:
         log("[飞书] 跳过写入（--skip-upload）")
 
     elapsed = time.time() - t0
     log(f"==== 完成，耗时 {elapsed:.1f}s ====")
+
+    # 飞书通知（上传成功后才通知，--no-notify 可跳过）
+    if not args.no_notify and not args.skip_upload and not args.dry_run and not args.download_only:
+        try:
+            token = feishu_token()
+            msg = (
+                f"【懂火出库同步报告】\n"
+                f"状态：✅ 成功\n"
+                f"更新记录：{total_written} 条\n"
+                f"耗时：{elapsed:.1f} 秒\n"
+                f"时间：{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+            feishu_send_text(FEISHU_NOTIFY_UNION_ID, msg, token)
+        except Exception as e:
+            log(f"[飞书通知] ⚠️ 发送异常: {e}")
+
     return 0
 
 
