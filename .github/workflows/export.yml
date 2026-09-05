@@ -9,6 +9,14 @@ on:
         description: "手动触发说明（可选）"
         required: false
         default: "手动立即触发"
+      export_days:
+        description: "导出最近 N 天；0=全部历史（全量）"
+        required: false
+        default: "30"
+      folder_token:
+        description: "飞书目标文件夹 token（覆盖 Secrets 里的 FEISHU_FOLDER_TOKEN）"
+        required: false
+        default: ""
 
 # 并发控制：同一时刻只跑一个实例
 concurrency:
@@ -45,14 +53,15 @@ jobs:
           DH_PASSWORD: ${{ secrets.DH_PASSWORD }}
 
           # 导出最近 N 天的出库记录（0 = 全部历史）；默认 30 天
-          EXPORT_DAYS: ${{ vars.EXPORT_DAYS || '30' }}
+          EXPORT_DAYS: ${{ github.event.inputs.export_days || vars.EXPORT_DAYS || '30' }}
 
           # ===== 飞书云盘 + 通知（主模式） =====
           # 企业自建应用的 App ID / App Secret
           FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
           FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
           # 目标文件夹 token（形如 fldcnXXXXXX，见 README 获取方法）
-          FEISHU_FOLDER_TOKEN: ${{ secrets.FEISHU_FOLDER_TOKEN }}
+          #   优先级：手动输入 folder_token > Secrets.FEISHU_FOLDER_TOKEN
+          FEISHU_FOLDER_TOKEN: ${{ github.event.inputs.folder_token || secrets.FEISHU_FOLDER_TOKEN }}
           # 通知机器人 Webhook（可选，上传成功后发通知）
           FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
           FEISHU_WEBHOOK_SECRET: ${{ secrets.FEISHU_WEBHOOK_SECRET }}

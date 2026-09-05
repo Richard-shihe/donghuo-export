@@ -50,10 +50,33 @@ Certification/_cert_work/
 /码单_*.xlsx
 /准发下载_*.xlsx
 
+# --- 宝钢酸洗：销售比对原始数据（xls 不入库，脚本可提交）
+/宝钢酸洗/*.xls
+/宝钢酸洗/*.xlsx
+
 # --- OS
 Thumbs.db
 .DS_Store
 desktop.ini
 
+# --- 欧冶登录 storage_state（含登录 cookie，严禁入库）
+欧冶/storage_state_ouyeel.json
+欧冶/storage_state_ouyeel.b64.txt
+
+# --- 欧冶登录脚本调试快照（PNG / HTML / JSON）
+欧冶/*_shot.png
+欧冶/*_dom.html
+欧冶/debug_*.png
+欧冶/debug_*.html
+欧冶/debug_*.json
+欧冶/downloads/
+
 # --- Trae / memory
 .trae/
+
+# --- 标准知识库（2026-09-06 归档）：709 个 PDF 原件仅本地存档，不入库 ---
+/标准知识库/standard_pdfs/
+
+# --- 懂火出库同步（本地项目）：运行产物不入库 ---
+/懂火出库同步/downloads/
+/懂火出库同步/csv_backup/
