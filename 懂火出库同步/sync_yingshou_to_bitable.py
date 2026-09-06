@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-懂火出库记录 → 飞书多维表格「数据汇总（2026）/出库数据」自动更新工作流。
+懂火「应收管理/应收结算」→ 飞书多维表格「数据汇总（2026）/tblpjne9dIuif5HD」自动更新工作流。
 
 流程：
   1. ddddocr + Playwright 自动登录懂火钢城系统
-  2. 打开出库记录页，点"筛选"，设置起始日期 2026-01-01，结束日期（今天）
-  3. 点系统自带"导出"按钮 → 下载 HTML 格式 .xls
-  4. pandas 解析 → 转 CSV（UTF-8-SIG）落本地备份
-  5. 清空飞书多维表 tblolnj06JZkYNiU 现有全部记录
-  6. 按原字段格式批量写入新数据
-  7. 发送飞书通知给洪（更新条数、耗时等摘要）
+  2. 打开 应收管理/应收结算 页（caiwu/v_x_jiesuan）
+  3. 点"筛选" → 清空开始日期（结束日期保持今天）→ 点"查询"应用
+  4. 点系统自带"导出"按钮（POST excelbiao/x_jiesuan）→ 下载 HTML 格式 .xls
+  5. pandas 解析 → 转 CSV（UTF-8-SIG）落本地备份
+  6. 清空飞书多维表 tblpjne9dIuif5HD 现有全部记录
+  7. 按原字段格式批量写入新数据
+  8. 上传成功后删除 CSV 备份
+  9. 发送飞书通知卡片给洪（更新条数、耗时等摘要）
 
-使用：python sync_chuku_to_bitable.py [--headless] [--skip-download] [--dry-run] [--no-notify]
-凭据：仓库根目录 .env 里的 DH_USERNAME / DH_PASSWORD + 系统环境变量 FEISHU_APP_ID / FEISHU_APP_SECRET
+使用：python sync_yingshou_to_bitable.py [--headless] [--skip-download] [--dry-run] [--no-notify] ...
+凭据：仓库根目录 .env 里的 DH_USERNAME / DH_PASSWORD + FEISHU_APP_ID / FEISHU_APP_SECRET
 """
 import sys, os, json, time, datetime, argparse, traceback, math, requests
 from pathlib import Path
@@ -24,14 +26,14 @@ sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 
 from dotenv import load_dotenv
-load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=False)  # .env 统一放仓库根目录（本脚本在子文件夹 懂火出库同步/ 内）
+load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=False)  # .env 统一放仓库根目录
 
 # ===== 固定配置 =====
 BITABLE_APP_TOKEN = "VahHb3YDBaBTwTsCjeAcaAhhnHc"   # 数据汇总（2026）
-BITABLE_TABLE_ID  = "tblolnj06JZkYNiU"               # 出库数据
-DONGHUO_LOGIN_URL  = "https://erpa.donghuo.vip/view/admin/v_login"
-DONGHUO_OUTBOUND_URL = "https://erpa.donghuo.vip/view/admin/xiaoshou/v_xjlall"
-EXPORT_START_DATE = "2026-01-01"   # 固定：从 2026 年 1 月 1 日起
+BITABLE_TABLE_ID  = "tblpjne9dIuif5HD"               # 应收管理（应收结算）
+DONGHUO_LOGIN_URL = "https://erpa.donghuo.vip/view/admin/v_login"
+DONGHUO_YS_URL    = "https://erpa.donghuo.vip/view/admin/caiwu/v_x_jiesuan"  # 应收管理→应收结算
+EXPORT_START_DATE = ""      # 清空开始日期（用户要求：不设起始日期，导出全量）
 DOWNLOAD_DIR = Path(__file__).parent / "downloads"
 DOWNLOAD_DIR.mkdir(exist_ok=True)
 CSV_DIR = Path(__file__).parent / "csv_backup"
@@ -43,41 +45,29 @@ BATCH_SIZE = 500    # 飞书 bitable batch_create/batch_delete 上限
 # 同步完成后飞书通知（默认发给 洪 on_b09bcbf3e74f5d423900aa9b2f00eb63）
 FEISHU_NOTIFY_UNION_ID = "on_b09bcbf3e74f5d423900aa9b2f00eb63"
 
-# ===== 多维表字段类型映射（2026-09-05 API 探测）=====
-# ftype: 1=Text, 2=Number, 5=DateTime(毫秒时间戳)
+# ===== 懂火导出列名 → 多维表字段名 别名映射 =====
+# 1) 导出列是「订单号」，多维表里文本字段叫「订单 号」（带空格）；「订单号」是公式列，禁止写入
+# 2) 导出列是「销售状态」，多维表字段叫「发货状态」
+COLUMN_ALIASES = {
+    "订单号": "订单 号",
+    "销售状态": "发货状态",
+}
+
+# ===== 多维表字段类型映射（2026-09-06 API 探测 tblpjne9dIuif5HD）=====
+# 参与(人员)、订单号(公式)、字段1~7 不由本脚本写入
 BITABLE_FIELD_TYPES = {
+    "订单 号":     "text",
+    "日期":         "datetime",
+    "发货状态":     "text",
     "所属公司":     "text",
-    "出库日期":     "datetime",
     "销售人":       "text",
     "客户名称":     "text",
-    "订单号":       "text",
-    "品名":         "text",
-    "规格":         "text",
-    "材质":         "text",
-    "产地":         "text",
-    "等级":         "text",
-    "件(张)数":     "number",
-    "采购重量(吨)": "number",
-    "重量(吨)":     "number",
-    "挂牌价":       "number",
-    "销售单价":     "number",
-    "销售税率":     "number",
-    "销售金额":     "number",
-    "未开发票":     "number",
-    "供应商":       "text",
-    "采购单价":     "number",
-    "采购税率":     "number",
-    "采购金额":     "number",
-    "费用金额":     "number",
-    "利润":         "number",
-    "市场盈利":     "number",
-    "仓库":         "text",
-    "库位号":       "text",
-    "捆包号":       "text",
-    "合同号":       "text",
-    "车船号":       "text",
-    "提单号":       "text",
-    "备注":         "text",
+    "实发重量":     "number",
+    "实发金额":     "number",
+    "销售费用":     "number",
+    "其它款项":     "number",
+    "已结金额":     "number",
+    "未结金额":     "number",
 }
 
 
@@ -126,9 +116,8 @@ def feishu_send_card(union_id: str, card: dict, token: str):
 
 
 # ===== 通知卡片模板 =====
-# 同步数据来源/目标描述（通知卡片里展示）
-SOURCE_DESC = "懂火「出库记录」（筛选 2026-01-01 起）"
-TARGET_DESC = "飞书多维表「数据汇总（2026）/出库数据」"
+SOURCE_DESC = "懂火「应收管理/应收结算」（清空开始日期，全量）"
+TARGET_DESC = "飞书多维表「数据汇总（2026）/应收管理 tblpjne9dIuif5HD」"
 
 # 当前执行环节（失败通知卡片里定位用）
 CURRENT_STEP = "初始化"
@@ -146,7 +135,7 @@ def build_success_card(written: int, cleared, elapsed_s: float) -> dict:
     ]
     return {
         "config": {"wide_screen_mode": True},
-        "header": {"template": "green", "title": {"tag": "plain_text", "content": "✅ 懂火出库记录同步成功"}},
+        "header": {"template": "green", "title": {"tag": "plain_text", "content": "✅ 懂火应收结算同步成功"}},
         "elements": [
             {"tag": "div", "fields": fields},
             {"tag": "hr"},
@@ -162,7 +151,7 @@ def build_failure_card(step: str, error: str) -> dict:
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     return {
         "config": {"wide_screen_mode": True},
-        "header": {"template": "red", "title": {"tag": "plain_text", "content": "❌ 懂火出库记录同步失败"}},
+        "header": {"template": "red", "title": {"tag": "plain_text", "content": "❌ 懂火应收结算同步失败"}},
         "elements": [
             {"tag": "div", "fields": [
                 {"is_short": True, "text": {"tag": "lark_md", "content": f"**失败环节**\n{step}"}},
@@ -177,32 +166,18 @@ def build_failure_card(step: str, error: str) -> dict:
 
 # ============ 懂火 → 下载 xls ============
 #
-# 【登录分工说明】为什么不复用封装好的 donghuo_login.py？
-# ---------------------------------------------------------
-#   donghuo_login.py 的 login_donghuo() 是【requests 版】登录：
-#     通过 POST /controller/admin/c_longin/index 接口登录，
-#     返回一个 requests.Session，登录态存在该 Session 的 Cookie 里。
-#     它适合「登录后用 session 直接调后端数据接口」的场景
-#     （例如 export_chuku.py / export_jiagong.py 这类扒接口脚本）。
-#
-#   但本工作流的第 4 步要求「点击系统自带导出按钮」完成导出，
-#     这是纯前端交互，必须用【Playwright 真实浏览器】去点 DOM 元素。
-#     requests.Session 与浏览器 Cookie 互不相通，把 requests 的登录态
-#     塞进浏览器行不通；而浏览器自己登录后，session 也不会回到 requests。
-#
-#   因此这里在浏览器里【内联重写】了登录（ddddocr 识别验证码 → 填表单
-#     → 点 #laysubmit，重试 10 次）。账号密码仍从 .env 的
-#     DH_USERNAME / DH_PASSWORD 读取，与 donghuo_login.py 保持同一凭据来源。
-# ---------------------------------------------------------
+# 【登录分工说明】与 sync_chuku_to_bitable.py 相同：
+#   导出按钮是纯前端交互，必须用 Playwright 真实浏览器点击；
+#   因此在浏览器里内联重写登录（ddddocr 识别验证码 → 填表单 → 点 #laysubmit），
+#   账号密码仍从 .env 的 DH_USERNAME / DH_PASSWORD 读取。
 
-def download_chuku_xls(headless: bool = False) -> Path:
+def download_yingshou_xls(headless: bool = False) -> Path:
     """
-    用 Playwright 自动登录懂火 → 设日期筛选 → 点系统导出按钮 → 下载 xls。
-    返回下载的文件路径。
+    用 Playwright 自动登录懂火 → 应收结算页 → 筛选里清空开始日期 → 查询
+    → 点系统导出按钮（POST excelbiao/x_jiesuan）→ 下载 xls。返回文件路径。
     """
     import ddddocr
     import playwright.sync_api as pw
-    import requests  # noqa: F401 (在 feishu_token 里用到；这里仅保证 import 链完整)
 
     username = env("DH_USERNAME")
     password = env("DH_PASSWORD")
@@ -258,63 +233,65 @@ def download_chuku_xls(headless: bool = False) -> Path:
             browser.close()
             raise RuntimeError("懂火登录失败，已达最大重试次数")
 
-        # --- 打开出库记录页 ---
-        CURRENT_STEP = "打开出库记录页"
-        page.goto(DONGHUO_OUTBOUND_URL, wait_until="domcontentloaded", timeout=30000)
+        # --- 打开应收结算页（iframe 网格页可直接访问，与出库记录同模式）---
+        CURRENT_STEP = "打开应收结算页"
+        page.goto(DONGHUO_YS_URL, wait_until="domcontentloaded", timeout=30000)
         page.wait_for_timeout(4000)
-        log(f"[懂火] ✅ 已到达出库记录页: {page.url}")
+        log(f"[懂火] ✅ 已到达应收结算页: {page.url}")
 
         # --- 点"筛选"按钮 ---
-        CURRENT_STEP = "设置日期筛选并查询"
+        CURRENT_STEP = "打开筛选面板并清空开始日期"
         page.get_by_text("筛选", exact=True).first.click()
         page.wait_for_timeout(1500)
         log("[懂火] ✅ 筛选面板已打开")
 
-        # --- JS 设日期 ---
-        today_str = datetime.date.today().strftime("%Y-%m-%d")
-        result = page.evaluate("""(startVal) => {
+        # --- JS 清空开始日期（结束日期保持系统默认值不变）---
+        result = page.evaluate("""() => {
             const startEl = document.getElementById('start_time');
-            const endEl = document.getElementById('end_time');
             if (startEl) {
                 startEl.removeAttribute('readonly');
-                startEl.value = startVal;
+                startEl.value = '';
                 startEl.setAttribute('readonly', 'readonly');
                 startEl.dispatchEvent(new Event('change', {bubbles: true}));
                 startEl.dispatchEvent(new Event('blur', {bubbles: true}));
             }
-            if (endEl) {
-                endEl.removeAttribute('readonly');
-                endEl.value = 'TODAY_PLACEHOLDER';
-                endEl.setAttribute('readonly', 'readonly');
-                endEl.dispatchEvent(new Event('change', {bubbles: true}));
-                endEl.dispatchEvent(new Event('blur', {bubbles: true}));
-            }
-            return {start: startEl?.value, end: endEl?.value};
-        }""".replace("TODAY_PLACEHOLDER", today_str), EXPORT_START_DATE)
-        log(f"[懂火] ✅ 日期筛选已设: {result}")
+            return {start: startEl ? startEl.value : '(无此输入框)'};
+        }""")
+        log(f"[懂火] ✅ 开始日期已清空: {result}")
 
-        # --- 点筛选弹窗底部的"查询"按钮（layui-btn，Y>500 的第一个非 close）---
-        btns = page.evaluate("""
-        () => Array.from(document.querySelectorAll('button.layui-btn'))
-          .map((b, i) => {
-            const r = b.getBoundingClientRect();
-            return {idx: i, cls: b.className, y: Math.round(r.top), rect:[Math.round(r.left),Math.round(r.top),Math.round(r.width),Math.round(r.height)]};
-          })
-          .filter(b => b.rect[2]>0 && b.rect[3]>0)
-        """)
-        popup_btns = [b for b in btns if b['y'] > 500]
-        confirm = next((b for b in popup_btns if 'close' not in b['cls']), None)
-        if confirm is None:
-            confirm = popup_btns[0] if popup_btns else btns[0]
-        page.locator("button.layui-btn").nth(confirm['idx']).click()
+        # --- 点筛选弹窗底部的"查询"按钮应用筛选 ---
+        clicked = False
+        try:
+            page.get_by_text("查询", exact=True).first.click(timeout=5000)
+            clicked = True
+        except Exception:
+            pass
+        if not clicked:
+            # 兜底：按 chuku 脚本的位置启发式（弹窗底部第一个非 close 按钮）
+            btns = page.evaluate("""
+            () => Array.from(document.querySelectorAll('button.layui-btn'))
+              .map((b, i) => {
+                const r = b.getBoundingClientRect();
+                return {idx: i, cls: b.className, y: Math.round(r.top),
+                        rect: [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)]};
+              })
+              .filter(b => b.rect[2] > 0 && b.rect[3] > 0)
+            """)
+            popup_btns = [b for b in btns if b['y'] > 500]
+            confirm = next((b for b in popup_btns if 'close' not in b['cls']), None)
+            if confirm is None:
+                confirm = popup_btns[0] if popup_btns else (btns[0] if btns else None)
+            if confirm is None:
+                raise RuntimeError("找不到筛选弹窗的查询按钮")
+            page.locator("button.layui-btn").nth(confirm['idx']).click()
         page.wait_for_timeout(2500)
-        log("[懂火] ✅ 筛选已应用")
+        log("[懂火] ✅ 筛选已应用（开始日期为空=不限起始）")
 
         # --- 点"导出"按钮，等待下载 ---
         CURRENT_STEP = "点击系统导出按钮下载"
-        log("[懂火] 开始导出（可能几秒到几十秒）...")
+        log("[懂火] 开始导出（全量数据，可能十几秒到几十秒）...")
         export_btn = page.get_by_text("导出", exact=True).first
-        with page.expect_download(timeout=120000) as dl_info:
+        with page.expect_download(timeout=300000) as dl_info:
             export_btn.click()
         dl = dl_info.value
         target = DOWNLOAD_DIR / dl.suggested_filename
@@ -342,11 +319,13 @@ def xls_to_clean_df(xls_path: Path):
     df.columns = header
     # 去掉可能的完全空行
     df = df.dropna(how="all")
+    # 列名别名（懂火导出名 → 多维表字段名）
+    df = df.rename(columns=COLUMN_ALIASES)
     log(f"[解析] {xls_path.name}: {len(df)} 行 × {len(df.columns)} 列")
 
     # 落 CSV 备份
     now = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    csv_path = CSV_DIR / f"chuku_export_{now}.csv"
+    csv_path = CSV_DIR / f"yingshou_export_{now}.csv"
     df.to_csv(csv_path, index=False, encoding="utf-8-sig")
     log(f"[备份] CSV 已保存: {csv_path}")
     return df, csv_path
@@ -354,7 +333,7 @@ def xls_to_clean_df(xls_path: Path):
 
 # ============ 飞书多维表：清空 + 写入 ============
 
-def bitable_list_all_records(token: str) -> list[str]:
+def bitable_list_all_records(token: str) -> list:
     """返回多维表内所有 record_id（⚠️ search 接口的 page_token 会永远不推进，必须用 GET list 接口 + query string）"""
     h = {"Authorization": f"Bearer {token}"}
     base_url = f"{FEISHU_OPEN_BASE}/bitable/v1/apps/{BITABLE_APP_TOKEN}/tables/{BITABLE_TABLE_ID}/records"
@@ -382,7 +361,6 @@ def bitable_list_all_records(token: str) -> list[str]:
             else:
                 dup += 1
         if dup == len(items):
-            # 全重复 → page_token 没推进，硬停
             log(f"[飞书] ⚠️ page_token 未推进，停止；累计 {len(all_ids)} 条")
             break
         if len(all_ids) % 5000 == 0:
@@ -396,9 +374,8 @@ def bitable_list_all_records(token: str) -> list[str]:
     return all_ids
 
 
-def bitable_batch_delete(token: str, record_ids: list[str]):
+def bitable_batch_delete(token: str, record_ids: list):
     h = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    # ignore_consistency_check=true 加速（牺牲强一致换吞吐）
     url = f"{FEISHU_OPEN_BASE}/bitable/v1/apps/{BITABLE_APP_TOKEN}/tables/{BITABLE_TABLE_ID}/records/batch_delete?ignore_consistency_check=true"
     total = len(record_ids)
     for i in range(0, total, BATCH_SIZE):
@@ -441,13 +418,12 @@ def _convert_value(raw, ftype: str):
     return None
 
 
-def df_to_bitable_records(df) -> list[dict]:
+def df_to_bitable_records(df) -> list:
     """把 DataFrame 转成飞书 batch_create 需要的 [{"fields": {...}}, ...] 列表"""
     records = []
-    col_name_to_ftype = BITABLE_FIELD_TYPES  # 懂火导出列名 == 多维表字段名
     for _, row in df.iterrows():
         fields = {}
-        for col, ftype in col_name_to_ftype.items():
+        for col, ftype in BITABLE_FIELD_TYPES.items():
             if col not in df.columns:
                 continue
             val = _convert_value(row.get(col), ftype)
@@ -457,7 +433,7 @@ def df_to_bitable_records(df) -> list[dict]:
     return records
 
 
-def bitable_batch_create(token: str, records: list[dict]):
+def bitable_batch_create(token: str, records: list):
     h = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     url = f"{FEISHU_OPEN_BASE}/bitable/v1/apps/{BITABLE_APP_TOKEN}/tables/{BITABLE_TABLE_ID}/records/batch_create?ignore_consistency_check=true"
     total = len(records)
@@ -488,7 +464,7 @@ def main():
 
     global CURRENT_STEP
     t0 = time.time()
-    log("==== 懂火出库记录 → 飞书多维表 同步工作流 启动 ====")
+    log("==== 懂火应收结算 → 飞书多维表 同步工作流 启动 ====")
 
     # ---- Step 1: 下载 ----
     if args.skip_download:
@@ -499,7 +475,7 @@ def main():
         xls_path = xls_files[0]
         log(f"[跳过下载] 使用已有文件: {xls_path}")
     else:
-        xls_path = download_chuku_xls(headless=args.headless)
+        xls_path = download_yingshou_xls(headless=args.headless)
 
     # ---- Step 2: 解析 ----
     CURRENT_STEP = "解析导出文件"
@@ -509,8 +485,8 @@ def main():
 
     if args.dry_run:
         log("[DRY-RUN] 不操作飞书")
-        log(f"  前 3 行: {df.head(3).to_dict(orient='records')}")
         log(f"  列名: {list(df.columns)}")
+        log(f"  前 3 行: {df.head(3).to_dict(orient='records')}")
         elapsed = time.time() - t0
         log(f"==== 完成（DRY-RUN），耗时 {elapsed:.1f}s ====")
         return 0
@@ -544,7 +520,7 @@ def main():
         CURRENT_STEP = "预检写入（前 5 条）"
         log(f"[飞书] Step B: 写入 {len(df)} 条新记录 ...")
         records = df_to_bitable_records(df)
-        # 先小批量试一条，验证字段类型没问题
+        # 先小批量试写，验证字段类型/名称没问题
         test_batch = records[:min(5, len(records))]
         h = {"Authorization": f"Bearer {token}"}
         url_test = f"{FEISHU_OPEN_BASE}/bitable/v1/apps/{BITABLE_APP_TOKEN}/tables/{BITABLE_TABLE_ID}/records/batch_create"
@@ -554,8 +530,7 @@ def main():
             log(f"[飞书] ❌ 预检写入失败: code={d.get('code')} msg={d.get('msg')}")
             log(f"  样本记录: {json.dumps(test_batch[0], ensure_ascii=False)[:800]}")
             raise RuntimeError(f"预检写入失败: code={d.get('code')} msg={d.get('msg')}")
-        log(f"[飞书] ✅ 预检写入 {len(test_batch)} 条成功，继续写剩余 {len(records)-len(test_batch)} 条")
-        # 预检写了就是写了，从索引 5 开始写剩余的
+        log(f"[飞书] ✅ 预检写入 {len(test_batch)} 条成功，继续写剩余 {len(records) - len(test_batch)} 条")
         CURRENT_STEP = "批量写入多维表"
         remaining = records[len(test_batch):]
         if remaining:
@@ -568,6 +543,7 @@ def main():
             log(f"[清理] CSV 已删除: {csv_path.name}")
     else:
         log("[飞书] 跳过写入（--skip-upload）")
+        total_written = 0
 
     elapsed = time.time() - t0
     log(f"==== 完成，耗时 {elapsed:.1f}s ====")

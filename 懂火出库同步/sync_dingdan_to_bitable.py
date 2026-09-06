@@ -1,18 +1,26 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-懂火出库记录 → 飞书多维表格「数据汇总（2026）/出库数据」自动更新工作流。
+懂火「销售订单 → 订单明细汇总」→ 飞书多维表格「数据汇总（2026）/订单明细」自动更新工作流。
 
 流程：
   1. ddddocr + Playwright 自动登录懂火钢城系统
-  2. 打开出库记录页，点"筛选"，设置起始日期 2026-01-01，结束日期（今天）
-  3. 点系统自带"导出"按钮 → 下载 HTML 格式 .xls
-  4. pandas 解析 → 转 CSV（UTF-8-SIG）落本地备份
-  5. 清空飞书多维表 tblolnj06JZkYNiU 现有全部记录
-  6. 按原字段格式批量写入新数据
-  7. 发送飞书通知给洪（更新条数、耗时等摘要）
+  2. 直达「订单明细汇总」页 v_xmxhz（该页是「销售订单」模块里"订单明细汇总"Tab 的
+     内容页，支持像出库记录 v_xjlall 一样独立直达，已实测验证）
+  3. 点"筛选"，把「出库状态」设为"全部"，点确认按钮
+  4. 点系统自带"导出"按钮 → 下载 HTML 格式 .xls（不扒接口）
+  5. pandas 解析 → 转 CSV（UTF-8-SIG）落本地备份（上传成功后自动删除）
+  6. 清空飞书多维表 tblcEZoQatk7lCAO 现有全部记录
+  7. 按多维表字段格式批量写入新数据（字段类型通过飞书 API 动态探测，无需硬编码）
+  8. 发送飞书卡片通知给洪（更新条数、耗时；失败时发红色告警卡片）
 
-使用：python sync_chuku_to_bitable.py [--headless] [--skip-download] [--dry-run] [--no-notify]
+与 sync_chuku_to_bitable.py 的关系：
+  同属懂火同步项目，登录方式与 chuku 完全一致（浏览器内联登录，原因见 chuku
+  脚本内「登录分工说明」）；两脚本保持独立、互不影响，故意不抽公共库。
+  差异点：导航路径、筛选条件（出库状态=全部 vs 日期区间）、目标表、字段映射方式
+  （本表字段通过 API 动态探测，chuku 表是硬编码）。
+
+使用：python sync_dingdan_to_bitable.py [--headless] [--skip-download] [--dry-run] [--no-notify]
 凭据：仓库根目录 .env 里的 DH_USERNAME / DH_PASSWORD + 系统环境变量 FEISHU_APP_ID / FEISHU_APP_SECRET
 """
 import sys, os, json, time, datetime, argparse, traceback, math, requests
@@ -24,18 +32,23 @@ sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 
 from dotenv import load_dotenv
-load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=False)  # .env 统一放仓库根目录（本脚本在子文件夹 懂火出库同步/ 内）
+load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=False)  # .env 统一放仓库根目录
 
 # ===== 固定配置 =====
 BITABLE_APP_TOKEN = "VahHb3YDBaBTwTsCjeAcaAhhnHc"   # 数据汇总（2026）
-BITABLE_TABLE_ID  = "tblolnj06JZkYNiU"               # 出库数据
-DONGHUO_LOGIN_URL  = "https://erpa.donghuo.vip/view/admin/v_login"
-DONGHUO_OUTBOUND_URL = "https://erpa.donghuo.vip/view/admin/xiaoshou/v_xjlall"
-EXPORT_START_DATE = "2026-01-01"   # 固定：从 2026 年 1 月 1 日起
-DOWNLOAD_DIR = Path(__file__).parent / "downloads"
-DOWNLOAD_DIR.mkdir(exist_ok=True)
-CSV_DIR = Path(__file__).parent / "csv_backup"
-CSV_DIR.mkdir(exist_ok=True)
+BITABLE_TABLE_ID  = "tblcEZoQatk7lCAO"               # 订单明细
+DONGHUO_BASE      = "https://erpa.donghuo.vip"
+DONGHUO_LOGIN_URL = f"{DONGHUO_BASE}/view/admin/v_login"
+# 「订单明细汇总」内容页：懂火里它挂在「销售订单」模块的 Tab 上（容器页 v_ifram_dd，
+# 内容 iframe 原始 src=v_xmxhz），与出库记录 v_xjlall 一样支持登录后独立直达（2026-09-05 实测）
+DONGHUO_ORDER_SUMMARY_URL = f"{DONGHUO_BASE}/view/admin/xiaoshou/v_xmxhz"
+FILTER_LABEL = "出库状态"    # 筛选面板里的字段名
+FILTER_VALUE = "全部"        # 筛选面板里要选的值
+
+DOWNLOAD_DIR = Path(__file__).parent / "downloads" / "dingdan"
+DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+CSV_DIR = Path(__file__).parent / "csv_backup" / "dingdan"
+CSV_DIR.mkdir(parents=True, exist_ok=True)
 
 FEISHU_OPEN_BASE = "https://open.feishu.cn/open-apis"
 BATCH_SIZE = 500    # 飞书 bitable batch_create/batch_delete 上限
@@ -43,41 +56,21 @@ BATCH_SIZE = 500    # 飞书 bitable batch_create/batch_delete 上限
 # 同步完成后飞书通知（默认发给 洪 on_b09bcbf3e74f5d423900aa9b2f00eb63）
 FEISHU_NOTIFY_UNION_ID = "on_b09bcbf3e74f5d423900aa9b2f00eb63"
 
-# ===== 多维表字段类型映射（2026-09-05 API 探测）=====
-# ftype: 1=Text, 2=Number, 5=DateTime(毫秒时间戳)
-BITABLE_FIELD_TYPES = {
-    "所属公司":     "text",
-    "出库日期":     "datetime",
-    "销售人":       "text",
-    "客户名称":     "text",
-    "订单号":       "text",
-    "品名":         "text",
-    "规格":         "text",
-    "材质":         "text",
-    "产地":         "text",
-    "等级":         "text",
-    "件(张)数":     "number",
-    "采购重量(吨)": "number",
-    "重量(吨)":     "number",
-    "挂牌价":       "number",
-    "销售单价":     "number",
-    "销售税率":     "number",
-    "销售金额":     "number",
-    "未开发票":     "number",
-    "供应商":       "text",
-    "采购单价":     "number",
-    "采购税率":     "number",
-    "采购金额":     "number",
-    "费用金额":     "number",
-    "利润":         "number",
-    "市场盈利":     "number",
-    "仓库":         "text",
-    "库位号":       "text",
-    "捆包号":       "text",
-    "合同号":       "text",
-    "车船号":       "text",
-    "提单号":       "text",
-    "备注":         "text",
+# ===== 飞书多维表字段类型码 → 写入策略（2026-09-05 API 规范）=====
+# 1=Text 2=Number 3=SingleSelect 4=MultiSelect 5=DateTime 7=Checkbox 13=Phone
+# 其余（11=User 15=Url 17=Attachment 18=Link 19=Lookup 20=Formula 1001+=自动字段）
+# 均不可直接写文本值，跳过不写。
+FIELD_TYPE_CODE_MAP = {
+    1: "text", 2: "number", 3: "text", 4: "multiselect",
+    5: "datetime", 7: "checkbox", 13: "text",
+}
+
+# 懂火导出列名 → 多维表字段名 别名映射（2026-09-05 实测表结构）：
+#   表里文本字段叫「订单 号」（中间带空格），另有一个「订单号」是公式字段不可写；
+#   导出的「备注」列在表里叫「注释」。
+COLUMN_ALIASES = {
+    "订单号": "订单 号",
+    "备注": "注释",
 }
 
 
@@ -85,6 +78,10 @@ BITABLE_FIELD_TYPES = {
 
 def log(msg: str):
     print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
+
+
+def env(name: str) -> str:
+    return os.environ.get(name, "").strip()
 
 
 def feishu_token() -> str:
@@ -104,8 +101,13 @@ def feishu_token() -> str:
     return data["tenant_access_token"]
 
 
-def env(name: str) -> str:
-    return os.environ.get(name, "").strip()
+# ===== 通知卡片模板 =====
+# 同步数据来源/目标描述（通知卡片里展示）
+SOURCE_DESC = "懂火「销售订单 → 订单明细汇总」（出库状态=全部）"
+TARGET_DESC = "飞书多维表「数据汇总（2026）/订单明细」"
+
+# 当前执行环节（失败通知卡片里定位用）
+CURRENT_STEP = "初始化"
 
 
 def feishu_send_card(union_id: str, card: dict, token: str):
@@ -125,15 +127,6 @@ def feishu_send_card(union_id: str, card: dict, token: str):
         log(f"[飞书通知] ✅ 卡片已发送给 {union_id}")
 
 
-# ===== 通知卡片模板 =====
-# 同步数据来源/目标描述（通知卡片里展示）
-SOURCE_DESC = "懂火「出库记录」（筛选 2026-01-01 起）"
-TARGET_DESC = "飞书多维表「数据汇总（2026）/出库数据」"
-
-# 当前执行环节（失败通知卡片里定位用）
-CURRENT_STEP = "初始化"
-
-
 def build_success_card(written: int, cleared, elapsed_s: float) -> dict:
     """同步成功通知卡片（绿色）"""
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -146,7 +139,7 @@ def build_success_card(written: int, cleared, elapsed_s: float) -> dict:
     ]
     return {
         "config": {"wide_screen_mode": True},
-        "header": {"template": "green", "title": {"tag": "plain_text", "content": "✅ 懂火出库记录同步成功"}},
+        "header": {"template": "green", "title": {"tag": "plain_text", "content": "✅ 懂火订单明细同步成功"}},
         "elements": [
             {"tag": "div", "fields": fields},
             {"tag": "hr"},
@@ -162,7 +155,7 @@ def build_failure_card(step: str, error: str) -> dict:
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     return {
         "config": {"wide_screen_mode": True},
-        "header": {"template": "red", "title": {"tag": "plain_text", "content": "❌ 懂火出库记录同步失败"}},
+        "header": {"template": "red", "title": {"tag": "plain_text", "content": "❌ 懂火订单明细同步失败"}},
         "elements": [
             {"tag": "div", "fields": [
                 {"is_short": True, "text": {"tag": "lark_md", "content": f"**失败环节**\n{step}"}},
@@ -177,32 +170,109 @@ def build_failure_card(step: str, error: str) -> dict:
 
 # ============ 懂火 → 下载 xls ============
 #
-# 【登录分工说明】为什么不复用封装好的 donghuo_login.py？
-# ---------------------------------------------------------
-#   donghuo_login.py 的 login_donghuo() 是【requests 版】登录：
-#     通过 POST /controller/admin/c_longin/index 接口登录，
-#     返回一个 requests.Session，登录态存在该 Session 的 Cookie 里。
-#     它适合「登录后用 session 直接调后端数据接口」的场景
-#     （例如 export_chuku.py / export_jiagong.py 这类扒接口脚本）。
-#
-#   但本工作流的第 4 步要求「点击系统自带导出按钮」完成导出，
-#     这是纯前端交互，必须用【Playwright 真实浏览器】去点 DOM 元素。
-#     requests.Session 与浏览器 Cookie 互不相通，把 requests 的登录态
-#     塞进浏览器行不通；而浏览器自己登录后，session 也不会回到 requests。
-#
-#   因此这里在浏览器里【内联重写】了登录（ddddocr 识别验证码 → 填表单
-#     → 点 #laysubmit，重试 10 次）。账号密码仍从 .env 的
-#     DH_USERNAME / DH_PASSWORD 读取，与 donghuo_login.py 保持同一凭据来源。
-# ---------------------------------------------------------
+# 登录方式与 sync_chuku_to_bitable.py 完全一致：浏览器内联登录（ddddocr 识别验证码
+# → 填表单 → 点 #laysubmit，重试 10 次）。为什么不用 requests 版 donghuo_login.py，
+# 见 chuku 脚本内「登录分工说明」。账号密码同样走 .env 的 DH_USERNAME / DH_PASSWORD。
 
-def download_chuku_xls(headless: bool = False) -> Path:
+def find_owner_for_text(page, text: str, tries: int = 10, interval_ms: int = 1000):
     """
-    用 Playwright 自动登录懂火 → 设日期筛选 → 点系统导出按钮 → 下载 xls。
-    返回下载的文件路径。
+    在主页面与所有 iframe 中查找精确文本元素，返回承载它的 Page 或 Frame。
+    懂火是 layui admin，点导航打开的内容可能在 iframe 里；直接 goto URL 则在主页面。
+    找不到返回 None。
+    """
+    for _ in range(tries):
+        try:
+            if page.get_by_text(text, exact=True).count() > 0:
+                return page
+        except Exception:
+            pass
+        for f in page.frames:
+            try:
+                if f.get_by_text(text, exact=True).count() > 0:
+                    return f
+            except Exception:
+                pass
+        page.wait_for_timeout(interval_ms)
+    return None
+
+
+JS_SET_SELECT = """
+([labelText, wantText]) => {
+    // 把筛选面板里 labelText 对应的 select 设为 wantText 选项
+    const selects = Array.from(document.querySelectorAll('select'));
+    const hasOpt = (s, t) => Array.from(s.options).some(o => o.textContent.trim() === t);
+    const report = selects.map(s => ({
+        id: s.id, name: s.name,
+        opts: Array.from(s.options).map(o => o.textContent.trim()).slice(0, 10),
+    }));
+    let hit = null;
+    // 规则1：通过 layui form-item 的 label 文本关联
+    for (const s of selects) {
+        if (!hasOpt(s, wantText)) continue;
+        const item = s.closest('.layui-form-item') || s.parentElement;
+        const lb = item ? item.querySelector('.layui-form-label, label, .layui-inline') : null;
+        if (lb && lb.textContent.trim().includes(labelText)) { hit = s; break; }
+    }
+    // 规则2：兜底——全页唯一一个含该选项的 select
+    if (!hit) {
+        const cands = selects.filter(s => hasOpt(s, wantText));
+        if (cands.length === 1) hit = cands[0];
+    }
+    if (!hit) return {ok: false, report};
+    const target = Array.from(hit.options).find(o => o.textContent.trim() === wantText);
+    hit.value = target.value;
+    hit.dispatchEvent(new Event('input', {bubbles: true}));
+    hit.dispatchEvent(new Event('change', {bubbles: true}));
+    try { if (window.layui && layui.form) layui.form.render('select'); } catch (e) {}
+    return {
+        ok: true, id: hit.id, name: hit.name, value: hit.value,
+        text: hit.selectedOptions[0] ? hit.selectedOptions[0].textContent.trim() : '',
+    };
+}
+"""
+
+JS_PICK_CONFIRM = """
+() => {
+    // 在筛选弹窗里挑确认按钮：优先文本含 查询/搜索/确定/确认/提交 的可见 layui-btn，
+    // 其中优先 y>500（弹窗底部），再按 DOM 靠后者（弹窗层后插入）；找不到才退回旧启发式。
+    const all = Array.from(document.querySelectorAll('button.layui-btn, a.layui-btn'))
+      .map((b, i) => {
+        const r = b.getBoundingClientRect();
+        return {idx: i, cls: b.className, txt: b.textContent.trim(),
+                y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height)};
+      })
+      .filter(b => b.w > 0 && b.h > 0 && b.y > 0);
+    const want = ['查询', '搜索', '确定', '确认', '提交'];
+    let cands = all.filter(b => b.cls && !b.cls.includes('close') && want.some(t => b.txt.includes(t)));
+    if (cands.length) {
+        cands.sort((a, b) => ((b.y > 500) - (a.y > 500)) || (b.idx - a.idx));
+        return cands[0];
+    }
+    const popup = all.filter(b => b.y > 500 && b.cls && !b.cls.includes('close'));
+    const picked = popup[0] || all[0] || null;
+    return picked;
+}
+"""
+
+JS_CLICK_VISIBLE_OPTION = """
+(wantText) => {
+    // layui 渲染层下拉：点当前可见的 dd 选项（文本精确等于 wantText）
+    const dds = Array.from(document.querySelectorAll('.layui-form-select dl dd'));
+    const visible = dds.filter(d => d.offsetParent !== null);
+    const t = visible.find(d => d.textContent.trim() === wantText);
+    if (t) { t.click(); return true; }
+    return false;
+}
+"""
+
+
+def download_dingdan_xls(headless: bool = False) -> Path:
+    """
+    用 Playwright 自动登录懂火 → 直达订单明细汇总页 → 筛选出库状态=全部
+    → 点系统导出按钮 → 下载 xls。返回下载的文件路径。
     """
     import ddddocr
     import playwright.sync_api as pw
-    import requests  # noqa: F401 (在 feishu_token 里用到；这里仅保证 import 链完整)
 
     username = env("DH_USERNAME")
     password = env("DH_PASSWORD")
@@ -228,7 +298,7 @@ def download_chuku_xls(headless: bool = False) -> Path:
         ctx = browser.new_context(accept_downloads=True)
         page = ctx.new_page()
 
-        # --- 登录（重试最多 10 次）---
+        # --- 登录（重试最多 10 次，与 chuku 完全一致）---
         logged_in = False
         for attempt in range(1, 11):
             log(f"[懂火] 登录尝试 {attempt}/10 ...")
@@ -258,64 +328,64 @@ def download_chuku_xls(headless: bool = False) -> Path:
             browser.close()
             raise RuntimeError("懂火登录失败，已达最大重试次数")
 
-        # --- 打开出库记录页 ---
-        CURRENT_STEP = "打开出库记录页"
-        page.goto(DONGHUO_OUTBOUND_URL, wait_until="domcontentloaded", timeout=30000)
+        # --- 直达「订单明细汇总」页 ---
+        CURRENT_STEP = "打开订单明细汇总页"
+        page.goto(DONGHUO_ORDER_SUMMARY_URL, wait_until="domcontentloaded", timeout=30000)
         page.wait_for_timeout(4000)
-        log(f"[懂火] ✅ 已到达出库记录页: {page.url}")
+
+        owner = find_owner_for_text(page, "筛选", tries=6)
+        if owner is None:
+            browser.close()
+            raise RuntimeError(f"未找到「筛选」元素（{DONGHUO_ORDER_SUMMARY_URL} 页面结构可能已变化）")
+        log(f"[懂火] ✅ 已到达订单明细汇总页: {page.url}（载体: {'主页面' if owner is page else 'iframe'}）")
 
         # --- 点"筛选"按钮 ---
-        CURRENT_STEP = "设置日期筛选并查询"
-        page.get_by_text("筛选", exact=True).first.click()
+        CURRENT_STEP = "设置筛选条件（出库状态=全部）"
+        owner.get_by_text("筛选", exact=True).first.click()
         page.wait_for_timeout(1500)
         log("[懂火] ✅ 筛选面板已打开")
 
-        # --- JS 设日期 ---
-        today_str = datetime.date.today().strftime("%Y-%m-%d")
-        result = page.evaluate("""(startVal) => {
-            const startEl = document.getElementById('start_time');
-            const endEl = document.getElementById('end_time');
-            if (startEl) {
-                startEl.removeAttribute('readonly');
-                startEl.value = startVal;
-                startEl.setAttribute('readonly', 'readonly');
-                startEl.dispatchEvent(new Event('change', {bubbles: true}));
-                startEl.dispatchEvent(new Event('blur', {bubbles: true}));
-            }
-            if (endEl) {
-                endEl.removeAttribute('readonly');
-                endEl.value = 'TODAY_PLACEHOLDER';
-                endEl.setAttribute('readonly', 'readonly');
-                endEl.dispatchEvent(new Event('change', {bubbles: true}));
-                endEl.dispatchEvent(new Event('blur', {bubbles: true}));
-            }
-            return {start: startEl?.value, end: endEl?.value};
-        }""".replace("TODAY_PLACEHOLDER", today_str), EXPORT_START_DATE)
-        log(f"[懂火] ✅ 日期筛选已设: {result}")
+        # --- 把「出库状态」设为"全部" ---
+        res = owner.evaluate(JS_SET_SELECT, [FILTER_LABEL, FILTER_VALUE])
+        if res.get("ok"):
+            log(f"[懂火] ✅ {FILTER_LABEL} 已设为 '{res.get('text')}'（select id={res.get('id')} name={res.get('name')}）")
+        else:
+            log(f"[懂火] ⚠️ 原生 select 未命中，页面 select 概况: {json.dumps(res.get('report'), ensure_ascii=False)}")
+            # 兜底：layui 渲染层下拉（点开下拉再点"全部"选项）
+            try:
+                label_loc = owner.get_by_text(FILTER_LABEL, exact=True).first
+                parent = label_loc.locator("xpath=..")
+                dd = parent.locator(".layui-form-select").first
+                if dd.count() == 0:
+                    dd = owner.locator(".layui-form-select").last
+                dd.locator("input.layui-input, .layui-select-title, .layui-edge").first.click()
+                page.wait_for_timeout(600)
+                clicked = owner.evaluate(JS_CLICK_VISIBLE_OPTION, FILTER_VALUE)
+                page.wait_for_timeout(300)
+                if clicked:
+                    log(f"[懂火] ✅ 已通过 layui 渲染层把 {FILTER_LABEL} 点选为 '{FILTER_VALUE}'")
+                else:
+                    raise RuntimeError("渲染层未见可见的'全部'选项")
+            except Exception as e:
+                browser.close()
+                raise RuntimeError(f"设置 {FILTER_LABEL}='{FILTER_VALUE}' 失败: {e}；请人工确认筛选面板结构") from e
 
-        # --- 点筛选弹窗底部的"查询"按钮（layui-btn，Y>500 的第一个非 close）---
-        btns = page.evaluate("""
-        () => Array.from(document.querySelectorAll('button.layui-btn'))
-          .map((b, i) => {
-            const r = b.getBoundingClientRect();
-            return {idx: i, cls: b.className, y: Math.round(r.top), rect:[Math.round(r.left),Math.round(r.top),Math.round(r.width),Math.round(r.height)]};
-          })
-          .filter(b => b.rect[2]>0 && b.rect[3]>0)
-        """)
-        popup_btns = [b for b in btns if b['y'] > 500]
-        confirm = next((b for b in popup_btns if 'close' not in b['cls']), None)
-        if confirm is None:
-            confirm = popup_btns[0] if popup_btns else btns[0]
-        page.locator("button.layui-btn").nth(confirm['idx']).click()
+        # --- 点筛选面板的确认按钮 ---
+        btn = owner.evaluate(JS_PICK_CONFIRM)
+        if btn is None:
+            browser.close()
+            raise RuntimeError("筛选面板未找到确认按钮")
+        log(f"[懂火] 点击筛选确认按钮: '{btn['txt']}' (y={btn['y']})")
+        owner.locator("button.layui-btn, a.layui-btn").nth(btn["idx"]).click()
         page.wait_for_timeout(2500)
         log("[懂火] ✅ 筛选已应用")
 
         # --- 点"导出"按钮，等待下载 ---
         CURRENT_STEP = "点击系统导出按钮下载"
         log("[懂火] 开始导出（可能几秒到几十秒）...")
-        export_btn = page.get_by_text("导出", exact=True).first
-        with page.expect_download(timeout=120000) as dl_info:
-            export_btn.click()
+        export_loc = owner.get_by_text("导出", exact=True).first
+        with page.expect_download(timeout=180000) as dl_info:
+            export_loc.click()
         dl = dl_info.value
         target = DOWNLOAD_DIR / dl.suggested_filename
         dl.save_as(str(target))
@@ -331,7 +401,7 @@ def download_chuku_xls(headless: bool = False) -> Path:
 def xls_to_clean_df(xls_path: Path):
     """
     解析懂火导出的 HTML 格式 xls → 返回 DataFrame（第 0 行为表头已跳过，列名已正确设置）。
-    同时落一份 UTF-8-SIG CSV 到 csv_backup/（上传成功后由调用方删除）。
+    同时落一份 UTF-8-SIG CSV 到 csv_backup/dingdan/（上传成功后由调用方删除）。
     返回 (DataFrame, csv_path)。
     """
     import pandas as pd
@@ -346,13 +416,36 @@ def xls_to_clean_df(xls_path: Path):
 
     # 落 CSV 备份
     now = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    csv_path = CSV_DIR / f"chuku_export_{now}.csv"
+    csv_path = CSV_DIR / f"dingdan_export_{now}.csv"
     df.to_csv(csv_path, index=False, encoding="utf-8-sig")
     log(f"[备份] CSV 已保存: {csv_path}")
     return df, csv_path
 
 
-# ============ 飞书多维表：清空 + 写入 ============
+# ============ 飞书多维表：字段探测 + 清空 + 写入 ============
+
+def bitable_get_field_types(token: str) -> dict[str, str]:
+    """通过 API 动态探测多维表字段类型，返回 {字段名: 写入策略}"""
+    h = {"Authorization": f"Bearer {token}"}
+    url = f"{FEISHU_OPEN_BASE}/bitable/v1/apps/{BITABLE_APP_TOKEN}/tables/{BITABLE_TABLE_ID}/fields"
+    out = {}
+    page_token = None
+    while True:
+        qs = "page_size=100" + (f"&page_token={page_token}" if page_token else "")
+        r = requests.get(f"{url}?{qs}", headers=h, timeout=30)
+        d = r.json()
+        if d.get("code") != 0:
+            raise RuntimeError(f"获取字段列表失败: {d}")
+        dd = d.get("data") or {}
+        for f in dd.get("items") or []:
+            out[f["field_name"]] = FIELD_TYPE_CODE_MAP.get(f["type"], "unsupported")
+        if not dd.get("has_more"):
+            break
+        page_token = dd.get("page_token")
+        if not page_token:
+            break
+    return out
+
 
 def bitable_list_all_records(token: str) -> list[str]:
     """返回多维表内所有 record_id（⚠️ search 接口的 page_token 会永远不推进，必须用 GET list 接口 + query string）"""
@@ -423,36 +516,68 @@ def _convert_value(raw, ftype: str):
         if not s:
             return None
         try:
-            f = float(s)
+            f = float(s.replace(",", ""))
             return int(f) if f == int(f) else f
         except ValueError:
             return None
     if ftype == "datetime":
+        if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+            return int(raw) if raw > 10**12 else int(raw * 1000)  # 秒/毫秒时间戳兜底
         s = str(raw).strip()
         if not s:
             return None
-        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%Y/%m/%d %H:%M:%S", "%Y/%m/%d"):
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d",
+                    "%Y/%m/%d %H:%M:%S", "%Y/%m/%d"):
             try:
                 dt = datetime.datetime.strptime(s, fmt)
                 return int(dt.timestamp() * 1000)
             except ValueError:
                 continue
         return None
+    if ftype == "multiselect":
+        s = str(raw).strip()
+        if not s:
+            return None
+        parts = [p.strip() for p in s.replace("，", ",").replace("、", ",").replace(";", ",").replace("；", ",").split(",")]
+        vals = [p for p in parts if p]
+        return vals or None
+    if ftype == "checkbox":
+        s = str(raw).strip().lower()
+        if s in ("是", "true", "1", "y", "yes", "√", "已"):
+            return True
+        if s in ("否", "false", "0", "n", "no", ""):
+            return False
+        return None
     return None
 
 
-def df_to_bitable_records(df) -> list[dict]:
-    """把 DataFrame 转成飞书 batch_create 需要的 [{"fields": {...}}, ...] 列表"""
+def df_to_bitable_records(df, field_types: dict) -> list[dict]:
+    """把 DataFrame 转成飞书 batch_create 需要的 [{"fields": {...}}, ...] 列表（按动态探测的字段类型）"""
+    # 表字段名 → 导出列名：同名优先；COLUMN_ALIASES 兜底（如「订单 号」← 订单号）
+    field_to_col = {f: f for f in field_types}
+    for csv_col, field_name in COLUMN_ALIASES.items():
+        if field_name in field_types and field_name not in df.columns and csv_col in df.columns:
+            field_to_col[field_name] = csv_col
+    # 提示一次：完全对不上的列 / 不可写字段
+    for col in df.columns:
+        if col not in field_types and col not in COLUMN_ALIASES:
+            log(f"[飞书] ⚠️ 列 '{col}' 在多维表里不存在，跳过")
+    for field_name, ftype in field_types.items():
+        src = field_to_col.get(field_name)
+        if ftype == "unsupported" and src and src in df.columns:
+            log(f"[飞书] ⚠️ 字段 '{field_name}' 类型不可直接写入（公式/查找/人员等），跳过")
     records = []
-    col_name_to_ftype = BITABLE_FIELD_TYPES  # 懂火导出列名 == 多维表字段名
     for _, row in df.iterrows():
         fields = {}
-        for col, ftype in col_name_to_ftype.items():
-            if col not in df.columns:
+        for field_name, ftype in field_types.items():
+            if ftype == "unsupported":
                 continue
-            val = _convert_value(row.get(col), ftype)
+            src = field_to_col.get(field_name)
+            if src is None or src not in df.columns:
+                continue
+            val = _convert_value(row.get(src), ftype)
             if val is not None:
-                fields[col] = val
+                fields[field_name] = val
         records.append({"fields": fields})
     return records
 
@@ -478,7 +603,7 @@ def bitable_batch_create(token: str, records: list[dict]):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--headless", action="store_true", help="headless Chrome（默认 headed，便于人工观察）")
-    ap.add_argument("--skip-download", action="store_true", help="跳过下载，直接用 downloads/ 下最新的 xls")
+    ap.add_argument("--skip-download", action="store_true", help="跳过下载，直接用 downloads/dingdan/ 下最新的 xls")
     ap.add_argument("--skip-clear", action="store_true", help="跳过清空旧表（仅追加，不推荐，仅调试用）")
     ap.add_argument("--skip-upload", action="store_true", help="跳过写入多维表（只下载+转 CSV）")
     ap.add_argument("--download-only", action="store_true", help="等价 --skip-upload --skip-clear")
@@ -488,18 +613,18 @@ def main():
 
     global CURRENT_STEP
     t0 = time.time()
-    log("==== 懂火出库记录 → 飞书多维表 同步工作流 启动 ====")
+    log("==== 懂火订单明细汇总 → 飞书多维表 同步工作流 启动 ====")
 
     # ---- Step 1: 下载 ----
     if args.skip_download:
         CURRENT_STEP = "读取本地导出文件"
         xls_files = sorted(DOWNLOAD_DIR.glob("*.xls"), key=lambda p: p.stat().st_mtime, reverse=True)
         if not xls_files:
-            raise RuntimeError("--skip-download 但 downloads/ 下没有 xls 文件")
+            raise RuntimeError("--skip-download 但 downloads/dingdan/ 下没有 xls 文件")
         xls_path = xls_files[0]
         log(f"[跳过下载] 使用已有文件: {xls_path}")
     else:
-        xls_path = download_chuku_xls(headless=args.headless)
+        xls_path = download_dingdan_xls(headless=args.headless)
 
     # ---- Step 2: 解析 ----
     CURRENT_STEP = "解析导出文件"
@@ -509,8 +634,8 @@ def main():
 
     if args.dry_run:
         log("[DRY-RUN] 不操作飞书")
-        log(f"  前 3 行: {df.head(3).to_dict(orient='records')}")
         log(f"  列名: {list(df.columns)}")
+        log(f"  前 3 行: {df.head(3).to_dict(orient='records')}")
         elapsed = time.time() - t0
         log(f"==== 完成（DRY-RUN），耗时 {elapsed:.1f}s ====")
         return 0
@@ -521,9 +646,13 @@ def main():
         return 0
 
     # ---- Step 3: 飞书 ----
-    CURRENT_STEP = "获取飞书凭证"
+    CURRENT_STEP = "获取飞书凭证与字段"
     token = feishu_token()
     log("[飞书] ✅ tenant_access_token 已获取")
+
+    field_types = bitable_get_field_types(token)
+    writable = [k for k, v in field_types.items() if v != "unsupported"]
+    log(f"[飞书] ✅ 字段探测完成: 共 {len(field_types)} 个字段，可写 {len(writable)} 个")
 
     cleared_count = None
     if not args.skip_clear:
@@ -543,8 +672,8 @@ def main():
     if not args.skip_upload:
         CURRENT_STEP = "预检写入（前 5 条）"
         log(f"[飞书] Step B: 写入 {len(df)} 条新记录 ...")
-        records = df_to_bitable_records(df)
-        # 先小批量试一条，验证字段类型没问题
+        records = df_to_bitable_records(df, field_types)
+        # 先小批量试写 5 条，验证字段类型映射没问题
         test_batch = records[:min(5, len(records))]
         h = {"Authorization": f"Bearer {token}"}
         url_test = f"{FEISHU_OPEN_BASE}/bitable/v1/apps/{BITABLE_APP_TOKEN}/tables/{BITABLE_TABLE_ID}/records/batch_create"
@@ -554,8 +683,7 @@ def main():
             log(f"[飞书] ❌ 预检写入失败: code={d.get('code')} msg={d.get('msg')}")
             log(f"  样本记录: {json.dumps(test_batch[0], ensure_ascii=False)[:800]}")
             raise RuntimeError(f"预检写入失败: code={d.get('code')} msg={d.get('msg')}")
-        log(f"[飞书] ✅ 预检写入 {len(test_batch)} 条成功，继续写剩余 {len(records)-len(test_batch)} 条")
-        # 预检写了就是写了，从索引 5 开始写剩余的
+        log(f"[飞书] ✅ 预检写入 {len(test_batch)} 条成功，继续写剩余 {len(records) - len(test_batch)} 条")
         CURRENT_STEP = "批量写入多维表"
         remaining = records[len(test_batch):]
         if remaining:
