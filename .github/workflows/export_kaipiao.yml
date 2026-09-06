@@ -56,7 +56,7 @@ jobs:
           # 时区（确保文件名时间、日期正确）
           TZ: "Asia/Shanghai"
         run: |
-          python feishu_uploader/export_kaipiao.py
+          python 开票申请单/export_kaipiao.py
           EXIT_CODE=$?
           echo "脚本退出码: $EXIT_CODE"
           exit $EXIT_CODE

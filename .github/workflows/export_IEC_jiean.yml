@@ -114,7 +114,7 @@ jobs:
           fi
 
           # === 组装命令行参数 ===
-          CMD=( python iec_jiean_to_bitable.py )
+          CMD=( python IEC准发出厂结案/iec_jiean_to_bitable.py )
           if [ "${{ inputs.dry_run }}" = "true" ]; then
             CMD+=( --dry-run )
           fi

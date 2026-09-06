@@ -43,7 +43,7 @@ jobs:
           FEISHU_UNION_ID_OUYEE: ${{ secrets.FEISHU_UNION_ID_OUYEE || vars.FEISHU_UNION_ID_OUYEE || '' }}
           TZ: "Asia/Shanghai"
         run: |
-          python export_ouyeel_exel.py
+          python 临调欧冶/export_ouyeel_exel.py
           EXIT_CODE=$?
           echo "脚本退出码: $EXIT_CODE"
           exit $EXIT_CODE

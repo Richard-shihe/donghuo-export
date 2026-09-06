@@ -60,7 +60,7 @@ jobs:
             export IMPORT_LIMIT="${{ inputs.limit }}"
           fi
           echo "最终参数: $ARGS  IMPORT_LIMIT=${IMPORT_LIMIT}"
-          python import_jiagong.py $ARGS
+          python 懂火加工单同步/import_jiagong.py $ARGS
           EXIT_CODE=$?
           echo "脚本退出码: $EXIT_CODE"
           exit $EXIT_CODE

@@ -59,7 +59,7 @@ jobs:
           # 时区（确保文件名时间、日期范围正确）
           TZ: "Asia/Shanghai"
         run: |
-          python download_bundle.py
+          python IEC准发出厂结案/download_bundle.py
           EXIT_CODE=$?
           echo "脚本退出码: $EXIT_CODE"
           exit $EXIT_CODE
@@ -77,9 +77,9 @@ jobs:
           DRY_RUN_FLAG: ${{ inputs.dry_run }}
         run: |
           if [ "$DRY_RUN_FLAG" = "true" ]; then
-            python update_progress_delivery.py --dry-run
+            python IEC准发出厂结案/update_progress_delivery.py --dry-run
           else
-            python update_progress_delivery.py
+            python IEC准发出厂结案/update_progress_delivery.py
           fi
           EXIT_CODE=$?
           echo "脚本退出码: $EXIT_CODE"

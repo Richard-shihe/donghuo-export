@@ -82,7 +82,7 @@ jobs:
           # 时区（确保文件名时间正确）
           TZ: "Asia/Shanghai"
         run: |
-          python export_chuku.py
+          python 懂火出库导出/export_chuku.py
           EXIT_CODE=$?
           echo "脚本退出码: $EXIT_CODE"
           exit $EXIT_CODE

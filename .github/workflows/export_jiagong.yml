@@ -67,7 +67,7 @@ jobs:
             ARGS="$ARGS --limit ${{ inputs.limit }}"
           fi
           echo "最终参数: $ARGS"
-          python export_jiagong.py $ARGS
+          python 懂火加工单同步/export_jiagong.py $ARGS
           EXIT_CODE=$?
           echo "脚本退出码: $EXIT_CODE"
           exit $EXIT_CODE

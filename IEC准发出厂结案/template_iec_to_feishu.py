@@ -52,7 +52,7 @@ try:
 except ImportError:
     _HAS_PANDAS = False
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # 仓库根（ibaosteel_client.py 所在）
 from ibaosteel_client import IEC
 
 

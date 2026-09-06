@@ -80,7 +80,7 @@ from urllib3.util.retry import Retry
 # 路径定位：脚本在 RUKU/ 子目录，但 ibaosteel_client / .env 等在仓库根
 #   无论从哪里执行，都确保能 import 到 ibaosteel_client，也能找到根目录 .env
 # ============================================================
-_HERE = Path(__file__).resolve().parent             # RUKU/
+_HERE = Path(__file__).resolve().parent             # 懂火采购入库/
 _REPO_ROOT = _HERE.parent                            # 仓库根
 # 把仓库根 + 脚本所在目录都加入 sys.path（兼顾根目录/子目录两种运行方式）
 for _p in (str(_REPO_ROOT), str(_HERE)):

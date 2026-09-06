@@ -128,9 +128,9 @@ jobs:
           fi
 
           echo "=== 运行命令 ==="
-          echo "python import_lindiao_to_bitable.py $ARGS"
+          echo "python IEC准发出厂结案/import_lindiao_to_bitable.py $ARGS"
           echo ""
-          python import_lindiao_to_bitable.py $ARGS
+          python IEC准发出厂结案/import_lindiao_to_bitable.py $ARGS
 
       - name: 失败时告警
         if: failure()

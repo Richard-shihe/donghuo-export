@@ -1,4 +1,4 @@
-name: 懂火数据汇总 Update_Data（5 合 1 同步）
+name: 数据汇总 Update_Data（5 合 1 同步）
 
 on:
   workflow_dispatch:

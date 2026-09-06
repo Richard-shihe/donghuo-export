@@ -90,7 +90,7 @@ jobs:
           # 时区（确保文件名时间、日期正确）
           TZ: "Asia/Shanghai"
         run: |
-          python feishu_uploader/export_lindiao.py
+          python 临调欧冶/export_lindiao.py
           EXIT_CODE=$?
           echo "脚本退出码: $EXIT_CODE"
           exit $EXIT_CODE

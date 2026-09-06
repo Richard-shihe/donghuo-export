@@ -30,7 +30,7 @@ from collections import defaultdict
 
 import requests
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # 仓库根（donghuo_login.py 所在）
 from donghuo_login import login_donghuo
 
 BASE_URL = "https://erpa.donghuo.vip"

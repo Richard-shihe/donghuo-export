@@ -44,7 +44,6 @@ Certification/_cert_work/
 
 # --- 本地产物目录
 /_quality_certs/
-/Finance/
 
 # --- 脚本生成的带时间戳数据文件
 /码单_*.xlsx

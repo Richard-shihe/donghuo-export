@@ -73,7 +73,7 @@ jobs:
           else
             echo "实际执行模式：生成 XLSX + 上传飞书云盘 + 发汇总通知"
           fi
-          python backup_all.py
+          python 懂火每周全量备份/backup_all.py
           EXIT_CODE=$?
           echo "脚本退出码: $EXIT_CODE"
           exit $EXIT_CODE

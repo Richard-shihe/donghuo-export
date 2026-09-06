@@ -96,7 +96,7 @@ jobs:
           echo "DRY_RUN   : ${DRY_RUN_FLAG}    to_bitable: ${{ inputs.to_bitable }}"
           echo "IBAO_USER : ${IBAO_USERNAME:0:3}***    FEISHU_APP: ${FEISHU_APP_ID:0:7}***"
 
-          CMD="python RUKU/export_iec_madan.py"
+          CMD="python 懂火采购入库/export_iec_madan.py"
           if [ "$DRY_RUN_FLAG" = "true" ]; then CMD="$CMD --dry-run"; fi
           if [ -n "$DATE_START_FLAG" ];      then CMD="$CMD --date-start $DATE_START_FLAG"; fi
           if [ -n "$DATE_END_FLAG" ];        then CMD="$CMD --date-end   $DATE_END_FLAG";   fi
@@ -139,7 +139,7 @@ jobs:
           FEISHU_APP_SECRET:   ${{ secrets.FEISHU_APP_SECRET }}
           FEISHU_FOLDER_TOKEN: ${{ vars.MADAN_FOLDER_TOKEN || '' }}
         run: |
-          CMD="python RUKU/compare_madan_in_folder.py"
+          CMD="python 懂火采购入库/compare_madan_in_folder.py"
           if [ -n "$FEISHU_FOLDER_TOKEN" ]; then CMD="$CMD --folder-token $FEISHU_FOLDER_TOKEN"; fi
           echo "→ 执行: $CMD"
           $CMD
@@ -159,7 +159,7 @@ jobs:
           FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
         run: |
           echo "新增 ${added_count} 条 → 写入 采购订单明细汇总 (tblrhqzHuTsAprU3)"
-          python RUKU/iec_bundle-to-ruku.py --csv 比对_最新多出记录.csv --commit
+          python 懂火采购入库/iec_bundle-to-ruku.py --csv 比对_最新多出记录.csv --commit
           echo "✅ 写入完成"
 
       - name: ④ 跳过（无新增）
