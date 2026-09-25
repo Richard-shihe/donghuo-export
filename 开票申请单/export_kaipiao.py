@@ -534,9 +534,15 @@ def _btable_convert(csv_val, ftype: str):
 def bitable_find_existing_apply_ids(token: str, app_token: str,
                                     table_id: str,
                                     apply_ids: list[str]) -> set[str]:
-    """按指定的申请单号列表，用条件查询检查哪些已存在（1次API调用即可）
-    使用 POST /records/search + filter condition 按申请单号精确匹配。
+    """按指定的申请单号列表，用条件查询检查哪些已存在
+
+    飞书 search 接口的 filter.conditions 数量有上限（50 条），单号多时
+    一次性查询会直接报错。这里按 CHUNK_SIZE 分批查询（每批内仍是一个
+    单号一个 condition、conjunction=or），单号再多也能稳定完成。
+    查询失败会抛异常，由调用方决定是否中止写入。
     """
+    CHUNK_SIZE = 50  # 飞书 filter conditions 数量上限
+
     if not apply_ids:
         return set()
 
@@ -547,60 +553,67 @@ def bitable_find_existing_apply_ids(token: str, app_token: str,
 
     no_proxy = {"http": None, "https": None}
     existing: set[str] = set()
-    page_token = ""
-    seen_tokens: set[str] = set()
-    max_pages = 10
 
-    # 飞书 filter: 对每个申请单号用 "is" 操作符，conjunction=or
-    # value 格式: ["XFP2026-1293"]
-    conditions = [
-        {"field_name": "申请单号", "operator": "is", "value": [aid]}
-        for aid in unique_ids
-    ]
+    def _search_chunk(chunk: list[str]) -> set[str]:
+        """查询一批申请单号（≤CHUNK_SIZE 个 condition），返回已存在的集合"""
+        # 飞书 filter: 对每个申请单号用 "is" 操作符，conjunction=or
+        # value 格式: ["XFP2026-1293"]
+        conditions = [
+            {"field_name": "申请单号", "operator": "is", "value": [aid]}
+            for aid in chunk
+        ]
+        found: set[str] = set()
+        page_token = ""
+        seen_tokens: set[str] = set()
+        max_pages = 10
 
-    page_count = 0
-    while True:
-        page_count += 1
-        if page_count > max_pages:
-            break
-        if page_token and page_token in seen_tokens:
-            break
-        if page_token:
-            seen_tokens.add(page_token)
+        for _ in range(max_pages):
+            if page_token and page_token in seen_tokens:
+                break
+            if page_token:
+                seen_tokens.add(page_token)
 
-        url = (f"{FEISHU_OPEN_BASE}/bitable/v1/apps/{app_token}"
-               f"/tables/{table_id}/records/search")
-        body: dict = {
-            "page_size": 500,
-            "filter": {
-                "conjunction": "or",
-                "conditions": conditions,
-            },
-        }
-        if page_token:
-            body["page_token"] = page_token
-        r = requests.post(url, headers={"Authorization": f"Bearer {token}"},
-                          json=body, timeout=15, proxies=no_proxy)
-        data = r.json()
-        if data.get("code") != 0:
-            raise RuntimeError(f"bitable 条件查询失败: {data}")
-        d = data.get("data") or {}
-        items = d.get("items") or []
-        for it in items:
-            f = it.get("fields") or {}
-            apply_no = f.get("申请单号") or ""
-            if isinstance(apply_no, list):
-                for seg in apply_no:
-                    if isinstance(seg, dict) and seg.get("text"):
-                        existing.add(str(seg["text"]).strip())
-                        break
-            elif isinstance(apply_no, str):
-                if apply_no.strip():
-                    existing.add(apply_no.strip())
-        has_more = d.get("has_more", False)
-        page_token = d.get("page_token") or ""
-        if not has_more or not page_token:
-            break
+            url = (f"{FEISHU_OPEN_BASE}/bitable/v1/apps/{app_token}"
+                   f"/tables/{table_id}/records/search")
+            body: dict = {
+                "page_size": 500,
+                "filter": {
+                    "conjunction": "or",
+                    "conditions": conditions,
+                },
+            }
+            if page_token:
+                body["page_token"] = page_token
+            r = requests.post(url, headers={"Authorization": f"Bearer {token}"},
+                              json=body, timeout=15, proxies=no_proxy)
+            data = r.json()
+            if data.get("code") != 0:
+                raise RuntimeError(f"bitable 条件查询失败: {data}")
+            d = data.get("data") or {}
+            items = d.get("items") or []
+            for it in items:
+                f = it.get("fields") or {}
+                apply_no = f.get("申请单号") or ""
+                if isinstance(apply_no, list):
+                    for seg in apply_no:
+                        if isinstance(seg, dict) and seg.get("text"):
+                            found.add(str(seg["text"]).strip())
+                            break
+                elif isinstance(apply_no, str):
+                    if apply_no.strip():
+                        found.add(apply_no.strip())
+            has_more = d.get("has_more", False)
+            page_token = d.get("page_token") or ""
+            if not has_more or not page_token:
+                break
+
+        return found
+
+    for i in range(0, len(unique_ids), CHUNK_SIZE):
+        chunk = unique_ids[i:i + CHUNK_SIZE]
+        existing |= _search_chunk(chunk)
+        if i + CHUNK_SIZE < len(unique_ids):
+            time.sleep(0.2)  # 分批查询，友好限速
 
     print(f"[多维表格] 待查 {len(unique_ids)} 个申请单号，已存在 {len(existing)} 个")
     return existing
@@ -637,7 +650,8 @@ def bitable_append_rows(token: str, app_token: str, table_id: str,
             existing_ids = bitable_find_existing_apply_ids(
                 token, app_token, table_id, apply_ids)
         except Exception as exc:
-            print(f"[警告] 按申请单号条件查询失败（将不做去重）: {exc}")
+            # 去重查询失败时中止写入：宁可本次不写，也不能重复追加
+            raise RuntimeError(f"去重查询失败，中止写入以避免重复追加: {exc}") from exc
 
     records_payload: list[dict] = []
     skipped = 0
