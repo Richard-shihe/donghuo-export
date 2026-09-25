@@ -2,7 +2,9 @@ name: 质保书·① IEC 下载 → 原件待处理文件夹
 
 # 触发方式：Actions 页面手动 "Run workflow" 或 cron-job.org 外部触发
 # 流程：IEC 登录 → 按交期查询 → decrypt → Playwright 一体化下载 PDF → 飞书云盘原件文件夹
-# 脚本：Certification/stage1_certs_download.py
+# 脚本：Certification/stage1_certs_download_9.25_1.py
+#   （= 原 stage1 逻辑 + 登录后显式切换成员公司到 IEC_MEMBER_COMPANY_CODE，默认 QE000000 钢贸公司；
+#     修 IEC 账号激活公司漂移导致查询 0 条、CI 天天 exit 1 的问题。原脚本保留不动。）
 #
 # GitHub Actions 需要的 Secrets：
 #   IBAO_USERNAME / IBAO_PASSWORD       欧冶/IEC 账密（dddDocr 过验证码）
@@ -122,7 +124,7 @@ jobs:
           echo "FEISHU_APP_ID : ${FEISHU_APP_ID:0:7}***"
           echo "CERT_RAW_FOLDER_TOKEN : ${CERT_RAW_FOLDER_TOKEN:-YIrbf0NzlloFNKdYAjvcL6gXnhe (默认)}"
 
-          CMD="python Certification/stage1_certs_download.py"
+          CMD="python Certification/stage1_certs_download_9.25_1.py"
           # 优先级：显式 date-from/date-to > days > preset
           if [ -n "${INPUT_DATE_FROM}" ] || [ -n "${INPUT_DATE_TO}" ]; then
             [ -n "${INPUT_DATE_FROM}" ] && CMD="$CMD --date-from ${INPUT_DATE_FROM}"
