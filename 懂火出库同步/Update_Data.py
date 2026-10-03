@@ -1,37 +1,51 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-懂火 6 合 1 数据汇总同步工作流（一次登录 · 六部分合并执行 · 一张汇总通知卡）
+懂火 9 合 1 数据汇总同步工作流（纯 JSON 接口 · 零浏览器 · 一张汇总通知卡）
 
-把 懂火出库同步/ 下各模块的流程合并成一次运行：
+一次运行、一次登录，把 9 个模块全量取回并写入飞书多维表「数据汇总（2026）」：
 
-  部分     模块               取数方式                        目标表(数据汇总 2026)   同步语义
-  ─────────────────────────────────────────────────────────────────────────────────────────
-  ① 出库   出库记录           Playwright UI 导出(2026-01-01起)  tblolnj06JZkYNiU      全量替换
-  ② 订单   订单明细汇总        Playwright UI 导出(出库状态=全部)  tblcEZoQatk7lCAO      全量替换
-  ③ 应收   应收汇总(客户级)    Playwright UI 导出(无筛选条件)     tblpjne9dIuif5HD      全量替换
-  ④ 往来   收付款流水          getlist API(确认状态=全部)        tblbS1dPaDVL3GY8      全量替换
-  ⑤ 客户   客户管理 CRM        getlist API(筛选全空)            tblCE7zIWs804RR5      增量+已删除标记
-  ⑥ 销售订单 销售订单          Playwright UI 导出(出库状态=全部)  tblJZIyNXoe8PZer      全量替换
+  ① 出库记录  xiaoshou/m_xiaoshou/xjilulist  → 出库数据            全量替换
+  ② 销售明细  xiaoshou/m_dindan/mxlist       → 订单明细            全量替换（动态字段探测）
+  ③ 应收汇总  caiwu/m_yinshou/getlist        → 应收汇总            全量替换
+  ④ 往来流水  caiwu/m_liushui/getlist        → 往来                全量替换
+  ⑤ 客户管理  crm/m_kehu/getlist             → 客户管理            增量 + 已删除标记
+  ⑥ 销售订单  xiaoshou/m_dindan/getlist      → 订单数据            全量替换
+  ⑦ 采购订单  caigou/m_dindan/getlist        → 采购订单（自动建表）  全量替换
+  ⑧ 采购明细  caigou/m_dindan/mxlist         → 采购明细（自动建表）  全量替换
+  ⑨ 库存管理  xiaoshou/m_kucun/gl_kucun      → 库存（自动建表）      全量替换
 
-【一次登录的实现】
-  - Playwright 真 Chrome 登录一次（ddddocr 识别验证码）
-  - 登录成功后立即从 browser context 提取 cookies（登录态固定，后续导航不影响）
-  → 同一浏览器依次完成 ①②③⑥ 四个 UI 导出（导出按钮是纯前端交互，requests 点不了）
-  → cookies 注入 requests.Session 调 ④⑤ getlist 接口（与页面表格同一数据源，非扒网页）
-  - 若 cookie 注入不被接受或未走浏览器（--skip-download），④⑤ 自动退回 donghuo_login.py
-  - 客户模块「导出」按钮被部署方禁用（khdown 首行 return false + 服务端返回"没有权限"，
-    2026-09-06 实测），往来模块无独立导出页，两者均走 getlist 接口
+汇总卡片里每行都带该模块自己的「用时（取数 ／ 写入）」。
+
+【为什么不用浏览器了】
+取的是后台表格背后的 getlist 接口本身（不是扒 HTML），所以整条链路不需要
+Playwright / ddddocr / 点导出按钮 / 下载目录 / 解析伪 xls。2026-10-03 全量实测：
+8 模块接口取数合计 ≈217s，比原「导出按钮」混合方案（≈272s）快约 30%，
+且更保真——导出会把连续空格压成一个、把 null 渲染成 0，接口返回的是原值。
+
+【字段名一律同名直连，不做任何别名映射】
+约定（2026-10-03 与洪确认）：名字不一致时以接口返回的键名为准，去改飞书表里的列名，
+而不是在脚本里做 alias 强行映射。飞书侧已按此对齐：
+  采购重量(吨)→采购重量、发货状态→销售状态(⑥)、订单重量→销售重量(②)、
+  注释→备注(②)、订单 号→订单号(②)
+因此本脚本：接口里是什么键、什么值，就照抄进同名字段。
+  · 表里有列、接口没这个键 → 该列留空（例：② 的「合同号」，接口不返回）
+  · 接口有键、表里没这个列 → 记日志跳过（例：① 的「锌层/涂料/结构/颜色」等）
+  · 公式 / 查找 / 人员 / 自动类型 → 飞书不许 API 写，自动跳过
+
+【分页安全闸】
+懂火 getlist 单页上限就是 300 条（实测；写 500 会静默丢页）。翻满页数上限仍凑不齐
+rtotal 时该模块直接判失败——全量替换是先删后建，拿残缺数据去写比写失败糟糕得多。
 
 【失败隔离】
-  每个部分独立 try/except：一部分失败不阻断其他部分。
-  成功部分上传后自动删 CSV；失败部分 CSV 保留在 csv_backup/ 备查。
-  结束发一张汇总卡片给洪：全成功绿 / 部分失败橙 / 全失败红，附失败详情与客户删除名单。
+9 个模块各自独立 try，互不阻断；⑤ 客户是增量模式，只标记删除不真删。
 
-使用：python Update_Data.py [--headless] [--skip-download] [--dry-run] [--no-notify]
-                            [--only chuku,dingdan,yingshou,wanglai,kehu,xsdd]
+使用：
+  python Update_Data.py [--dry-run] [--no-notify] [--only a,b,...]
+  python Update_Data.py --check-fields [--markdown]     # 只读：字段对照表 / 安全闸
+  python Update_Data.py --ensure-tables [--dry-run]     # 幂等建 ⑦⑧⑨ 三张新表
+
 凭据：仓库根目录 .env 里的 DH_USERNAME / DH_PASSWORD + FEISHU_APP_ID / FEISHU_APP_SECRET
-（①②④⑤⑥ 的字段映射/筛选逻辑与对应单脚本一致；③ 已于 2026-10-02 由「应收结算」改造为「应收汇总」）
 """
 import sys, os, json, time, re, math, datetime, argparse, traceback, requests
 from pathlib import Path
@@ -46,60 +60,38 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=False)  # .env 统一放仓库根目录
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from donghuo_login import login_donghuo  # noqa: E402  cookie 兜底登录（--skip-download 时）
+from donghuo_login import login_donghuo  # noqa: E402  懂火登录（全程仅此一次，返回 requests.Session）
+
 
 # ===== 固定配置 =====
-DONGHUO_BASE   = "https://erpa.donghuo.vip"
-DONGHUO_LOGIN  = f"{DONGHUO_BASE}/view/admin/v_login"
-DONGHUO_URLS = {
-    "chuku":    f"{DONGHUO_BASE}/view/admin/xiaoshou/v_xjlall",     # 出库记录
-    "dingdan":  f"{DONGHUO_BASE}/view/admin/xiaoshou/v_xmxhz",      # 订单明细汇总
-    # ③ 应收汇总：「应收管理」容器页 v_x_ifram 里第二个 Tab 的内容页（2026-10-02 由 应收结算 改造而来）
-    "yingshou": f"{DONGHUO_BASE}/view/admin/caiwu/v_x_yinshou",     # 应收汇总
-    "wanglai":  f"{DONGHUO_BASE}/model/admin/caiwu/m_liushui/getlist",  # 往来流水 API
-    "kehu":     f"{DONGHUO_BASE}/model/admin/crm/m_kehu/getlist",   # 客户管理 API
-    # ⑥ 销售订单：「销售订单」容器页 v_ifram_dd 里第一个 Tab 的内容页（2026-10-02 实测可直达）
-    "xsdd":     f"{DONGHUO_BASE}/view/admin/xiaoshou/v_dindan",     # 销售订单
-}
-
+DONGHUO_BASE = "https://erpa.donghuo.vip"
 BITABLE_APP_TOKEN = "VahHb3YDBaBTwTsCjeAcaAhhnHc"   # 数据汇总（2026）
-TABLES = {
-    "chuku":    "tblolnj06JZkYNiU",
-    "dingdan":  "tblcEZoQatk7lCAO",
-    "yingshou": "tblpjne9dIuif5HD",   # 「应收」表（2026-10-02 由 应收结算 改为 应收汇总，9 字段）
-    "wanglai":  "tblbS1dPaDVL3GY8",
-    "kehu":     "tblCE7zIWs804RR5",
-    "xsdd":     "tblJZIyNXoe8PZer",   # 「订单数据」表（2026-10-02 建好 17 字段）
-}
-PART_NAMES = {
-    "chuku": "① 出库记录", "dingdan": "② 订单明细", "yingshou": "③ 应收汇总",
-    "wanglai": "④ 往来流水", "kehu": "⑤ 客户管理", "xsdd": "⑥ 销售订单",
-}
-
-# 部分清单（新增模块改这三行 + 上面的 3 个字典即可，流程/卡片都是从这里派生的）
-UI_PARTS   = ["chuku", "dingdan", "yingshou", "xsdd"]                     # Playwright 点「导出」按钮
-API_PARTS  = ["wanglai", "kehu"]                                          # getlist 接口
-PART_ORDER = ["chuku", "dingdan", "yingshou", "wanglai", "kehu", "xsdd"]  # 卡片/日志展示顺序
-
-EXPORT_START_DATE = "2026-01-01"   # ① 出库筛选起始日期
-PAGE_SIZE = 300                    # ④⑤ getlist 单页上限
-MAX_PAGES = 50                     # ④⑤ 分页保险丝
-BATCH_SIZE = 500                   # 飞书 bitable batch_* 上限
 FEISHU_OPEN_BASE = "https://open.feishu.cn/open-apis"
 FEISHU_NOTIFY_UNION_ID = "on_b09bcbf3e74f5d423900aa9b2f00eb63"   # 洪
 
-DOWNLOAD_DIR = Path(__file__).parent / "downloads" / "all"   # ①②③ xls 统一落这里
-DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+EXPORT_START_DATE = "2026-01-01"   # ① 出库筛选起始日期
+PAGE_SIZE  = 300    # 懂火 getlist 单页上限就是 300（实测），写 500 会静默丢页
+MAX_PAGES  = 50     # 分页保险丝：翻满仍凑不齐 rtotal → 该模块判失败
+BATCH_SIZE = 500    # 飞书 bitable batch_* 单次上限
 CSV_DIR = Path(__file__).parent / "csv_backup"
 CSV_DIR.mkdir(exist_ok=True)
+MD_PATH = Path(__file__).parent / "九合一字段对照表.md"
 
-# ===== 各部分字段映射（与单脚本一致）=====
 
-# ① 出库：懂火导出列名 == 多维表字段名（2026-09-05 硬编码映射）
+# ===== 字段映射（飞书字段名 == 懂火接口键名，全部同名直连）=====
+# 铁律（2026-10-03 与洪确认）：名字不一致时以接口键名为准，改飞书列名；
+# 脚本侧不做 alias、不做业务推导，ERP 上是什么就填什么。
+FIELD_TYPE_CODE_MAP = {   # 飞书字段类型码 → 写入策略；其余（User/Lookup/Formula/Url/Attachment/自动）不可写
+    1: "text", 2: "number", 3: "text", 4: "multiselect", 5: "datetime", 7: "checkbox", 13: "text",
+}
+_STRATEGY_TO_CREATE_CODE = {"text": 1, "number": 2, "datetime": 5}   # --ensure-tables 建表用
+
+# ① 出库记录（32 列；接口 50 键，另有锌层/涂料/结构/颜色/销售费用/最低价/合计成本/
+#    采购单号/目的港/米数/新增时间 等 18 个键表里没有对应列，跳过）
 CHUKU_FIELD_TYPES = {
     "所属公司": "text", "出库日期": "datetime", "销售人": "text", "客户名称": "text",
     "订单号": "text", "品名": "text", "规格": "text", "材质": "text", "产地": "text",
-    "等级": "text", "件(张)数": "number", "采购重量(吨)": "number", "重量(吨)": "number",
+    "等级": "text", "件(张)数": "number", "采购重量": "number", "重量(吨)": "number",
     "挂牌价": "number", "销售单价": "number", "销售税率": "number", "销售金额": "number",
     "未开发票": "number", "供应商": "text", "采购单价": "number", "采购税率": "number",
     "采购金额": "number", "费用金额": "number", "利润": "number", "市场盈利": "number",
@@ -107,22 +99,14 @@ CHUKU_FIELD_TYPES = {
     "提单号": "text", "备注": "text",
 }
 
-# ② 订单：动态探测字段 + 列名别名（表字段「订单 号」带空格是公式不可写，可写文本叫「订单 号」）
-DINGDAN_ALIASES = {"订单号": "订单 号", "备注": "注释"}
-FIELD_TYPE_CODE_MAP = {   # 飞书字段类型码 → 写入策略；其余（User/Lookup/Formula/Url/Attachment/自动）不可写
-    1: "text", 2: "number", 3: "text", 4: "multiselect", 5: "datetime", 7: "checkbox", 13: "text",
-}
-
-# ③ 应收：硬编码映射 + df 层面列名 rename（2026-09-06 探测）
-# ③ 应收汇总：客户级汇总（非订单级），2026-10-02 由「应收结算」改造
-# 表里另有「参与」= Lookup(客户表→参与人)：飞书 API 不许新建/修改 Lookup（type 19 不在白名单），
-# 它已由用户在界面上改指本表主字段「客户名称」，脚本无需写入、也不能写入
+# ③ 应收汇总（客户级汇总，非订单级）
+# 表里另有「参与」= Lookup(客户表→参与人)：飞书 API 不许新建/修改 Lookup，脚本不碰
 YINGSHOU_FIELD_TYPES = {
     "客户名称": "text", "所属公司": "text", "销售人": "text",
     "应收款": "number", "实收款": "number", "可结算": "number", "未收款": "number",
 }
 
-# ④ 往来：硬编码映射（2026-09-06 探测）
+# ④ 往来流水（接口 18 键，其中 id/提交日期/米数 表里无列）
 WANGLAI_FIELD_TYPES = {
     "所属公司": "text", "日期": "datetime", "我方帐户": "text", "交易对方": "text",
     "交易类型": "text", "科目名称": "text", "结算方式": "text", "金额": "number",
@@ -130,13 +114,53 @@ WANGLAI_FIELD_TYPES = {
     "备注说明": "text", "提交人": "text", "确认人": "text",
 }
 
-# ⑥ 销售订单：硬编码映射（2026-10-02 按实例导出文件核对，17 列与「订单数据」表字段 1:1，无需别名）
+# ⑥ 销售订单（17 列；表里另有提成项目自建的「利润」「市场利润」，接口无来源 → 每次同步会清空，
+#    见 README 已知风险）
 XSDD_FIELD_TYPES = {
-    "订单号": "text", "所属公司": "text", "日期": "datetime", "发货状态": "text",
+    "订单号": "text", "所属公司": "text", "日期": "datetime", "销售状态": "text",
     "销售人": "text", "客户名称": "text", "订单重量": "number", "订单金额": "number",
     "实发重量": "number", "实发金额": "number", "销售费用": "number", "其它款项": "number",
     "合同定金": "number", "已结金额": "number", "未结金额": "number", "合同未结": "number",
     "新增时间": "datetime",
+}
+
+# ⑦ 采购订单（新表，--ensure-tables 自动建）
+CGDD_FIELD_TYPES = {
+    "订单号": "text", "所属公司": "text", "日期": "datetime", "采购人": "text",
+    "供应商": "text", "发货状态": "text", "采购合同号": "text",
+    "订单重量": "number", "订单金额": "number", "入库重量": "number", "入库金额": "number",
+    "采购费用": "number", "其它款项": "number", "合同定金": "number", "应结金额": "number",
+    "已结金额": "number", "未结金额": "number", "合同未结": "number",
+    "新增时间": "datetime",
+}
+
+# ⑧ 采购明细（新表，--ensure-tables 自动建）
+CGMX_FIELD_TYPES = {
+    "订单号": "text", "所属公司": "text", "日期": "datetime", "采购人": "text",
+    "供应商": "text", "采购合同号": "text", "提单号": "text",
+    "品名": "text", "规格": "text", "材质": "text", "产地": "text", "等级": "text",
+    "结构": "text", "涂料": "text", "锌层": "text", "颜色": "text",
+    "备注": "text", "入库操作": "text",
+    "订单重量": "number", "入库重量": "number",
+    "采购单价": "number", "采购税率": "number", "采购金额": "number", "入库金额": "number",
+}
+
+# ⑨ 库存管理（新表，--ensure-tables 自动建；接口 41 键，丢掉 id 后 40 列）
+# ⚠️ 接口必须显式带 sxzhuantai=""（哪怕空串），不传会 PHP Fatal error: Undefined variable
+# 主字段用「捆包号」——ERP 库存列表里的库存标识，实测 1101/1101 行非空
+# （合同号有 6 行空，不能当主字段；主字段必须是 text）
+KUCUN_FIELD_TYPES = {
+    "捆包号": "text", "入库日期": "datetime", "所属公司": "text", "库存类型": "text",
+    "销售状态": "text", "采购人": "text", "供应商": "text", "货权": "text",
+    "品名": "text", "规格": "text", "材质": "text", "产地": "text", "等级": "text",
+    "锌层": "text", "涂料": "text", "结构": "text", "颜色": "text",
+    "件(张)数": "number", "重量(吨)": "number", "可售重量": "number", "可售件数": "number",
+    "销售单价": "number", "最低售价": "number", "锁定人": "text",
+    "采购税率": "number", "采购单价": "number", "采购金额": "number",
+    "费用金额": "number", "成本单价": "number",
+    "合同号": "text", "捆包号N": "text", "提单号": "text", "车船号": "text",
+    "米数": "text", "目的港": "text", "仓库": "text", "库位号": "text",
+    "库龄": "number", "备注": "text", "新增时间": "datetime",
 }
 
 # ⑤ 客户：主键=客户名称；跟踪字段；仅新增写创建时间；已删除标记
@@ -147,6 +171,77 @@ KEHU_TRACKED_FIELDS = [
 DELETED_MARK = "已删除"
 _JUNK_RE = re.compile(r"^\d{1,2}$")   # '1'/'0'/'00' 等占位垃圾值
 
+
+# ===== 九合一注册表（加模块只改这一处）=====
+# api     : /model/admin/ 之后的路径
+# page    : 该表在懂火后台的页面地址，用作 Referer（懂火要求带）
+# params  : 必须显式传的筛选参数——少一个就返回子集或非 JSON（实测）
+# table   : 飞书表 id；写 ensure 的表示按表名自动定位/建表
+# dynamic : 写入时实时探测飞书字段类型（② 订单明细用；其余用上面的硬编码映射）
+PART_ORDER = ["chuku", "dingdan", "yingshou", "wanglai", "kehu", "xsdd", "cgdd", "cgmx", "kucun"]
+
+
+def _today() -> str:
+    return datetime.date.today().strftime("%Y-%m-%d")
+
+
+PARTS = {
+    "chuku": {
+        "name": "① 出库记录", "table": "tblolnj06JZkYNiU",
+        "api": "xiaoshou/m_xiaoshou/xjilulist", "page": "xiaoshou/v_xjlall",
+        "params": lambda: {"start_time": EXPORT_START_DATE, "end_time": _today()},
+        "fields": CHUKU_FIELD_TYPES,
+    },
+    "dingdan": {
+        "name": "② 销售明细", "table": "tblcEZoQatk7lCAO",
+        "api": "xiaoshou/m_dindan/mxlist", "page": "xiaoshou/v_xmxhz",
+        "params": lambda: {}, "dynamic": True,
+    },
+    "yingshou": {
+        "name": "③ 应收汇总", "table": "tblpjne9dIuif5HD",
+        # ⚠️ 模块名是 m_yinshou（不是 yingshou），写错会返回「定义的模块不存在」
+        "api": "caiwu/m_yinshou/getlist", "page": "caiwu/v_x_yinshou",
+        "params": lambda: {},
+        "fields": YINGSHOU_FIELD_TYPES,
+    },
+    "wanglai": {
+        "name": "④ 往来流水", "table": "tblbS1dPaDVL3GY8",
+        "api": "caiwu/m_liushui/getlist", "page": "caiwu/v_x_jiesuan",
+        "params": lambda: {}, "fields": WANGLAI_FIELD_TYPES,
+    },
+    "kehu": {
+        "name": "⑤ 客户管理", "table": "tblCE7zIWs804RR5",
+        "api": "crm/m_kehu/getlist", "page": "crm/v_kehu",
+        "params": lambda: {}, "incremental": True,
+    },
+    "xsdd": {
+        "name": "⑥ 销售订单", "table": "tblJZIyNXoe8PZer",
+        "api": "xiaoshou/m_dindan/getlist", "page": "xiaoshou/v_dindan",
+        # fhzhuantai / shkzhuantai 必须显式传空串，否则只拿子集
+        "params": lambda: {"fhzhuantai": "", "shkzhuantai": ""},
+        "fields": XSDD_FIELD_TYPES,
+    },
+    "cgdd": {
+        "name": "⑦ 采购订单", "table": None, "ensure": "采购订单",
+        "api": "caigou/m_dindan/getlist", "page": "caigou/v_dindan",
+        "params": lambda: {}, "fields": CGDD_FIELD_TYPES,
+    },
+    "cgmx": {
+        "name": "⑧ 采购明细", "table": None, "ensure": "采购明细",
+        "api": "caigou/m_dindan/mxlist", "page": "caigou/v_dindan",
+        "params": lambda: {}, "fields": CGMX_FIELD_TYPES,
+    },
+    "kucun": {
+        "name": "⑨ 库存管理", "table": None, "ensure": "库存",
+        # ⚠️ sxzhuantai 必须显式传（哪怕空串），不传会 PHP Fatal error: Undefined variable
+        "api": "xiaoshou/m_kucun/gl_kucun", "page": "xiaoshou/v_kucun_gl",
+        "params": lambda: {"sxzhuantai": ""}, "fields": KUCUN_FIELD_TYPES,
+    },
+}
+
+PART_NAMES = {k: v["name"] for k, v in PARTS.items()}
+TABLES = {k: v["table"] for k, v in PARTS.items() if v.get("table")}
+_ENSURED = {}   # 运行时按表名解析出来的 table_id 缓存：{part: table_id}
 
 # ============ 工具函数 ============
 
@@ -214,348 +309,72 @@ def feishu_send_card(union_id: str, card: dict, token: str):
         log(f"[飞书通知] ✅ 汇总卡片已发送给 {union_id}")
 
 
-# ============ ①②③ Playwright：登录一次 + 三个 UI 导出 ============
+# ============ 懂火 getlist：八模块统一分页拉取 ============
 
-def browser_login(page, ocr, username: str, password: str):
-    """在给定 page 上完成懂火登录（ddddocr 识别验证码，最多 10 次）。失败 raise。"""
-    for attempt in range(1, 11):
-        log(f"[登录] 尝试 {attempt}/10 ...")
-        page.goto(DONGHUO_LOGIN, wait_until="domcontentloaded", timeout=20000)
-        page.wait_for_timeout(1200)
-        page.locator("input.layui-input:not(#captcha):not([type='password'])").first.fill(username)
-        page.locator("#u_pass").fill(password)
-        captcha_img = page.locator("img[src*='captcha']").first
-        code = ocr.classification(captcha_img.screenshot()).strip()
-        log(f"[登录] 验证码识别: '{code}'")
-        page.locator("#captcha").fill(code)
-        page.wait_for_timeout(200)
-        page.locator("#laysubmit").click()
-        page.wait_for_timeout(1200)
-        if "/v_login" not in page.url:
-            log("[登录] ✅ 登录成功")
-            return
-    raise RuntimeError("懂火登录失败，已达最大重试次数（10 次）")
+def _getlist_url(part: str) -> str:
+    return f"{DONGHUO_BASE}/model/admin/{PARTS[part]['api']}"
 
 
-def session_from_browser(ctx) -> requests.Session:
-    """从浏览器 context 提取 cookies → 构造带同款 UA 的 requests.Session（供 ④⑤ API 用）"""
-    s = requests.Session()
-    s.headers.update({
-        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                       "AppleWebKit/537.36 (KHTML, like Gecko) "
-                       "Chrome/120.0.0.0 Safari/537.36"),
-        "Accept-Language": "zh-CN,zh;q=0.9",
-        "X-Requested-With": "XMLHttpRequest",
-    })
-    for c in ctx.cookies():
-        s.cookies.set(c["name"], c["value"],
-                      domain=c.get("domain", "").lstrip("."), path=c.get("path", "/"))
-    return s
+def _getlist_headers(part: str) -> dict:
+    return {"X-Requested-With": "XMLHttpRequest",
+            "Referer": f"{DONGHUO_BASE}/view/admin/{PARTS[part]['page']}"}
 
 
-def _export_via_download(page, owner, target_dir: Path, prefix: str, timeout_ms: int) -> Path:
-    """点「导出」→ 等 download → 存为 {prefix}__原名.xls"""
-    log(f"[导出] 点击导出按钮（可能几秒到几十秒）...")
-    export_loc = owner.get_by_text("导出", exact=True).first
-    with page.expect_download(timeout=timeout_ms) as dl_info:
-        export_loc.click()
-    dl = dl_info.value
-    target = target_dir / f"{prefix}__{dl.suggested_filename}"
-    dl.save_as(str(target))
-    log(f"[导出] ✅ 下载完成: {target.name} ({target.stat().st_size / 1024:.1f} KB)")
-    return target
+def fetch_all(session, part: str) -> list:
+    """按模块从懂火 getlist 接口顺序翻页拉全量（后台页面表格用的就是这些接口）。
 
-
-def export_chuku(page) -> Path:
-    """① 出库记录：筛选 2026-01-01 起 → 系统导出按钮（与单脚本逻辑一致）"""
-    page.goto(DONGHUO_URLS["chuku"], wait_until="domcontentloaded", timeout=30000)
-    page.wait_for_timeout(4000)
-    page.get_by_text("筛选", exact=True).first.click()
-    page.wait_for_timeout(1500)
-    today_str = datetime.date.today().strftime("%Y-%m-%d")
-    result = page.evaluate("""([startVal, todayStr]) => {
-        const startEl = document.getElementById('start_time');
-        const endEl = document.getElementById('end_time');
-        if (startEl) {
-            startEl.removeAttribute('readonly');
-            startEl.value = startVal;
-            startEl.setAttribute('readonly', 'readonly');
-            startEl.dispatchEvent(new Event('change', {bubbles: true}));
-            startEl.dispatchEvent(new Event('blur', {bubbles: true}));
-        }
-        if (endEl) {
-            endEl.removeAttribute('readonly');
-            endEl.value = todayStr;
-            endEl.setAttribute('readonly', 'readonly');
-            endEl.dispatchEvent(new Event('change', {bubbles: true}));
-            endEl.dispatchEvent(new Event('blur', {bubbles: true}));
-        }
-        return {start: startEl?.value, end: endEl?.value};
-    }""", [EXPORT_START_DATE, today_str])
-    log(f"[① 出库] ✅ 日期筛选已设: {result}")
-    # 弹窗底部第一个非 close 的 layui-btn = 查询（原脚本启发式）
-    btns = page.evaluate("""
-    () => Array.from(document.querySelectorAll('button.layui-btn'))
-      .map((b, i) => {
-        const r = b.getBoundingClientRect();
-        return {idx: i, cls: b.className, y: Math.round(r.top),
-                rect: [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)]};
-      })
-      .filter(b => b.rect[2] > 0 && b.rect[3] > 0)
-    """)
-    popup_btns = [b for b in btns if b["y"] > 500]
-    confirm = next((b for b in popup_btns if "close" not in b["cls"]), None)
-    if confirm is None:
-        confirm = popup_btns[0] if popup_btns else (btns[0] if btns else None)
-    if confirm is None:
-        raise RuntimeError("① 出库：筛选弹窗未找到查询按钮")
-    page.locator("button.layui-btn").nth(confirm["idx"]).click()
-    page.wait_for_timeout(2500)
-    return _export_via_download(page, page, DOWNLOAD_DIR, "chuku", 120000)
-
-
-# ② 订单需要的 JS 工具（与单脚本一致）
-JS_SET_SELECT = """
-([labelText, wantText]) => {
-    const selects = Array.from(document.querySelectorAll('select'));
-    const hasOpt = (s, t) => Array.from(s.options).some(o => o.textContent.trim() === t);
-    const report = selects.map(s => ({
-        id: s.id, name: s.name,
-        opts: Array.from(s.options).map(o => o.textContent.trim()).slice(0, 10),
-    }));
-    let hit = null;
-    for (const s of selects) {
-        if (!hasOpt(s, wantText)) continue;
-        const item = s.closest('.layui-form-item') || s.parentElement;
-        const lb = item ? item.querySelector('.layui-form-label, label, .layui-inline') : null;
-        if (lb && lb.textContent.trim().includes(labelText)) { hit = s; break; }
-    }
-    if (!hit) {
-        const cands = selects.filter(s => hasOpt(s, wantText));
-        if (cands.length === 1) hit = cands[0];
-    }
-    if (!hit) return {ok: false, report};
-    const target = Array.from(hit.options).find(o => o.textContent.trim() === wantText);
-    hit.value = target.value;
-    hit.dispatchEvent(new Event('input', {bubbles: true}));
-    hit.dispatchEvent(new Event('change', {bubbles: true}));
-    try { if (window.layui && layui.form) layui.form.render('select'); } catch (e) {}
-    return {ok: true, id: hit.id, name: hit.name, value: hit.value,
-            text: hit.selectedOptions[0] ? hit.selectedOptions[0].textContent.trim() : ''};
-}
-"""
-
-JS_PICK_CONFIRM = """
-() => {
-    const all = Array.from(document.querySelectorAll('button.layui-btn, a.layui-btn'))
-      .map((b, i) => {
-        const r = b.getBoundingClientRect();
-        return {idx: i, cls: b.className, txt: b.textContent.trim(),
-                y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height)};
-      })
-      .filter(b => b.w > 0 && b.h > 0 && b.y > 0);
-    const want = ['查询', '搜索', '确定', '确认', '提交'];
-    let cands = all.filter(b => b.cls && !b.cls.includes('close') && want.some(t => b.txt.includes(t)));
-    if (cands.length) {
-        cands.sort((a, b) => ((b.y > 500) - (a.y > 500)) || (a.idx - b.idx));
-        return cands[0];
-    }
-    const popup = all.filter(b => b.y > 500 && b.cls && !b.cls.includes('close'));
-    return popup[0] || all[0] || null;
-}
-"""
-
-JS_CLICK_VISIBLE_OPTION = """
-(wantText) => {
-    const dds = Array.from(document.querySelectorAll('.layui-form-select dl dd'));
-    const visible = dds.filter(d => d.offsetParent !== null);
-    const t = visible.find(d => d.textContent.trim() === wantText);
-    if (t) { t.click(); return true; }
-    return false;
-}
-"""
-
-
-def _find_owner_for_text(page, text: str, tries: int = 6):
-    """在主页面与所有 iframe 中查找精确文本元素，返回承载它的 Page/Frame（② 订单用）"""
-    for _ in range(tries):
-        try:
-            if page.get_by_text(text, exact=True).count() > 0:
-                return page
-        except Exception:
-            pass
-        for f in page.frames:
-            try:
-                if f.get_by_text(text, exact=True).count() > 0:
-                    return f
-            except Exception:
-                pass
-        page.wait_for_timeout(1000)
-    return None
-
-
-def export_dingdan(page) -> Path:
-    """② 订单明细汇总：筛选 出库状态=全部 → 系统导出按钮（与单脚本逻辑一致）"""
-    page.goto(DONGHUO_URLS["dingdan"], wait_until="domcontentloaded", timeout=30000)
-    page.wait_for_timeout(4000)
-    owner = _find_owner_for_text(page, "筛选")
-    if owner is None:
-        raise RuntimeError("② 订单：页面未找到「筛选」元素（页面结构可能变化）")
-    owner.get_by_text("筛选", exact=True).first.click()
-    page.wait_for_timeout(1500)
-    res = owner.evaluate(JS_SET_SELECT, ["出库状态", "全部"])
-    if res.get("ok"):
-        log(f"[② 订单] ✅ 出库状态已设为 '{res.get('text')}'")
-    else:
-        log(f"[② 订单] ⚠️ 原生 select 未命中，尝试 layui 渲染层兜底")
-        try:
-            label_loc = owner.get_by_text("出库状态", exact=True).first
-            parent = label_loc.locator("xpath=..")
-            dd = parent.locator(".layui-form-select").first
-            if dd.count() == 0:
-                dd = owner.locator(".layui-form-select").last
-            dd.locator("input.layui-input, .layui-select-title, .layui-edge").first.click()
-            page.wait_for_timeout(600)
-            clicked = owner.evaluate(JS_CLICK_VISIBLE_OPTION, "全部")
-            page.wait_for_timeout(300)
-            if not clicked:
-                raise RuntimeError("渲染层未见可见的'全部'选项")
-            log("[② 订单] ✅ 已通过 layui 渲染层点选 '全部'")
-        except Exception as e:
-            raise RuntimeError(f"② 订单：设置 出库状态='全部' 失败: {e}") from e
-    btn = owner.evaluate(JS_PICK_CONFIRM)
-    if btn is None:
-        raise RuntimeError("② 订单：筛选面板未找到确认按钮")
-    owner.locator("button.layui-btn, a.layui-btn").nth(btn["idx"]).click()
-    page.wait_for_timeout(2500)
-    return _export_via_download(page, owner, DOWNLOAD_DIR, "dingdan", 180000)
-
-
-def export_yingshou(page) -> Path:
-    """③ 应收汇总：直接点系统导出按钮（全量）
-
-    2026-10-02 由「应收结算」改造而来。这一页没有「筛选」弹层，查询条件只有
-    所属公司/销售人/客户名称，也没有任何日期条件 —— 不填就是全量，
-    所以不用像 ① 那样清日期、也不用像 ②⑥ 那样设下拉，打开即可导出。
+    ⚠️ limit 上限是 300（2026-10-03 实测），写 500 会丢页。
+    ⚠️ 翻满 max_pages 仍没到 rtotal 直接 raise —— 全量替换是先删后建，
+       拿残缺数据去写，比直接失败糟糕得多。
     """
-    page.goto(DONGHUO_URLS["yingshou"], wait_until="domcontentloaded", timeout=30000)
-    page.wait_for_timeout(5000)
-    return _export_via_download(page, page, DOWNLOAD_DIR, "yingshou", 300000)
-
-
-def export_xsdd(page) -> Path:
-    """⑥ 销售订单：筛选 出库状态=全部 → 系统导出按钮（与 ② 同属「销售订单」模块，逻辑一致）
-
-    该页默认把「已完成」的订单排除在外（2026-10-02 实测：默认导出 880 行，缺的正是
-    1609 条「已完成」；显式设为「全部」后 2489 行 = 与人工导出逐条完全一致），
-    所以这里必须点一次筛选，不能直接点导出。
-    """
-    page.goto(DONGHUO_URLS["xsdd"], wait_until="domcontentloaded", timeout=30000)
-    page.wait_for_timeout(4000)
-    owner = _find_owner_for_text(page, "筛选")
-    if owner is None:
-        raise RuntimeError("⑥ 销售订单：页面未找到「筛选」元素（页面结构可能变化）")
-    owner.get_by_text("筛选", exact=True).first.click()
-    page.wait_for_timeout(1500)
-    res = owner.evaluate(JS_SET_SELECT, ["出库状态", "全部"])
-    if res.get("ok"):
-        log(f"[⑥ 销售订单] ✅ 出库状态已设为 '{res.get('text')}'")
-    else:
-        log("[⑥ 销售订单] ⚠️ 原生 select 未命中，尝试 layui 渲染层兜底")
-        try:
-            label_loc = owner.get_by_text("出库状态", exact=True).first
-            parent = label_loc.locator("xpath=..")
-            dd = parent.locator(".layui-form-select").first
-            if dd.count() == 0:
-                dd = owner.locator(".layui-form-select").last
-            dd.locator("input.layui-input, .layui-select-title, .layui-edge").first.click()
-            page.wait_for_timeout(600)
-            clicked = owner.evaluate(JS_CLICK_VISIBLE_OPTION, "全部")
-            page.wait_for_timeout(300)
-            if not clicked:
-                raise RuntimeError("渲染层未见可见的'全部'选项")
-            log("[⑥ 销售订单] ✅ 已通过 layui 渲染层点选 '全部'")
-        except Exception as e:
-            raise RuntimeError(f"⑥ 销售订单：设置 出库状态='全部' 失败: {e}") from e
-    btn = owner.evaluate(JS_PICK_CONFIRM)
-    if btn is None:
-        raise RuntimeError("⑥ 销售订单：筛选面板未找到确认按钮")
-    owner.locator("button.layui-btn, a.layui-btn").nth(btn["idx"]).click()
-    page.wait_for_timeout(2500)
-    return _export_via_download(page, owner, DOWNLOAD_DIR, "xsdd", 300000)
-
-
-# ============ ④⑤ requests：getlist 分页拉取（共用同一 session）============
-
-def _getlist_paged(session, url: str, referer: str, tag: str, max_pages: int = MAX_PAGES) -> list:
-    """getlist 分页拉全量：root=行列表、rtotal=总数；不带过滤参数=全量"""
-    headers = {"X-Requested-With": "XMLHttpRequest", "Referer": referer}
+    spec, name = PARTS[part], PARTS[part]["name"]
+    max_pages = spec.get("max_pages", MAX_PAGES)
+    params = spec["params"]()
     all_rows, rtotal = [], None
     for page_no in range(1, max_pages + 1):
-        r = session.post(url, data={"page": page_no, "limit": PAGE_SIZE},
-                         headers=headers, timeout=30)
+        r = session.post(_getlist_url(part), data={"page": page_no, "limit": PAGE_SIZE, **params},
+                         headers=_getlist_headers(part), timeout=60)
         try:
             data = r.json()
         except ValueError:
-            raise RuntimeError(f"{tag}：getlist 第 {page_no} 页返回非 JSON（登录态可能失效）: {r.text[:150]}")
+            raise RuntimeError(f"{name}：第 {page_no} 页返回非 JSON（登录态可能失效）: {r.text[:150]}")
         root = data.get("root") or []
         if rtotal is None:
             rtotal = int(data.get("rtotal") or 0)
-            log(f"[{tag}] 总数 rtotal={rtotal}，每页 {PAGE_SIZE}，预计 {math.ceil(rtotal / PAGE_SIZE)} 页")
+            log(f"[{name}] 总数 rtotal={rtotal}，每页 {PAGE_SIZE}，预计 {math.ceil(rtotal / PAGE_SIZE)} 页")
         all_rows.extend(root)
         if page_no % 5 == 0 or not root or (rtotal and len(all_rows) >= rtotal):
-            log(f"[{tag}] 第 {page_no} 页: 累计 {len(all_rows)}/{rtotal}")
+            log(f"[{name}] 第 {page_no} 页: 累计 {len(all_rows)}/{rtotal}")
         if not root or (rtotal and len(all_rows) >= rtotal):
             break
         time.sleep(0.3)
-    if rtotal and len(all_rows) < rtotal:
-        log(f"[{tag}] ⚠️ 仅拉到 {len(all_rows)}/{rtotal} 条")
+    if rtotal is not None and len(all_rows) < rtotal:
+        raise RuntimeError(f"{name}：只拉到 {len(all_rows)}/{rtotal} 条（翻满上限 {max_pages} 页）"
+                           f"—— 全量替换先删后建，拒绝写入残缺数据")
+    log(f"[{name}] ✅ 拉取完成，共 {len(all_rows)} 条")
+    if part == "kehu":
+        seen = defaultdict(int)
+        for row in all_rows:
+            n = norm_text(row.get("客户名称"))
+            if n:
+                seen[n] += 1
+        dups = {n: c for n, c in seen.items() if c > 1}
+        if dups:
+            log(f"[{name}] ⚠️ 名称重名 {len(dups)} 组（增量合并时按数据丰富度处理）")
+        log(f"[{name}] 唯一名称 {len(seen)} 个")
     return all_rows
 
 
-def fetch_wanglai(session) -> list:
-    """④ 往来流水：确认状态=全部（不传 zhuantai）"""
-    rows = _getlist_paged(session, DONGHUO_URLS["wanglai"],
-                          f"{DONGHUO_BASE}/view/admin/caiwu/v_x_jiesuan", "④ 往来")
-    log(f"[④ 往来] ✅ 拉取完成，共 {len(rows)} 条")
-    return rows
+def probe_json_keys(session, part: str) -> list:
+    """只拉第 1 页，取接口返回的键名（供 --check-fields 用，不落盘）"""
+    r = session.post(_getlist_url(part), data={"page": 1, "limit": PAGE_SIZE, **PARTS[part]["params"]()},
+                     headers=_getlist_headers(part), timeout=60)
+    root = (r.json().get("root") or [])
+    return list(root[0].keys()) if root else []
 
 
-def fetch_kehu(session) -> list:
-    """⑤ 客户管理：筛选清空所有条件（不带任何过滤参数）"""
-    rows = _getlist_paged(session, DONGHUO_URLS["kehu"],
-                          f"{DONGHUO_BASE}/view/admin/crm/v_kehu", "⑤ 客户")
-    # 重名预警
-    seen = defaultdict(int)
-    for row in rows:
-        n = norm_text(row.get("客户名称"))
-        if n:
-            seen[n] += 1
-    dups = {n: c for n, c in seen.items() if c > 1}
-    if dups:
-        log(f"[⑤ 客户] ⚠️ 名称重名 {len(dups)} 组（增量合并时按数据丰富度处理）")
-    log(f"[⑤ 客户] ✅ 拉取完成，共 {len(rows)} 行 / {len(seen)} 个唯一名称")
-    return rows
 
-
-# ============ 解析 / CSV 备份 ============
-
-def xls_to_df(xls_path: Path, csv_prefix: str):
-    """懂火 HTML 伪 xls → DataFrame + UTF-8-SIG CSV 备份。返回 (df, csv_path)。
-    列名一律保持原始导出名，改名交给 df_to_records 的 aliases 处理。"""
-    import pandas as pd
-    df_raw = pd.read_html(str(xls_path))[0]
-    header = list(df_raw.iloc[0])
-    df = df_raw.iloc[1:].reset_index(drop=True)
-    df.columns = header
-    df = df.dropna(how="all")
-    log(f"[解析] {xls_path.name}: {len(df)} 行 × {len(df.columns)} 列")
-    now = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    csv_path = CSV_DIR / f"{csv_prefix}_export_{now}.csv"
-    df.to_csv(csv_path, index=False, encoding="utf-8-sig")
-    log(f"[备份] CSV 已保存: {csv_path.name}")
-    return df, csv_path
-
+# ============ CSV 备份（每部分一份，写入成功后自动删除）============
 
 def rows_to_csv(rows: list, csv_prefix: str) -> Path:
     """④⑤ API 原始 dict 列表 → CSV 备份"""
@@ -566,8 +385,6 @@ def rows_to_csv(rows: list, csv_prefix: str) -> Path:
     df.to_csv(csv_path, index=False, encoding="utf-8-sig")
     log(f"[备份] CSV 已保存: {csv_path.name}（{len(df)} 行 × {len(df.columns)} 列）")
     return csv_path
-
-
 # ============ 飞书多维表通用（table_id 参数化）============
 
 def _records_url(table_id: str) -> str:
@@ -715,44 +532,36 @@ def convert_value(raw, ftype: str):
     return None
 
 
-def df_to_records(df, field_types: dict, aliases: dict = None) -> list:
-    """DataFrame → batch_create 记录列表。aliases: 导出列名→表字段名（仅 ② 订单需要）"""
-    aliases = aliases or {}
-    field_to_col = {f: f for f in field_types}
-    for csv_col, field_name in aliases.items():
-        if field_name in field_types and field_name not in df.columns and csv_col in df.columns:
-            field_to_col[field_name] = csv_col
-    for col in df.columns:
-        if col not in field_types and col not in aliases:
-            log(f"[飞书] ⚠️ 列 '{col}' 在表字段里不存在，跳过")
-    records = []
-    for _, row in df.iterrows():
-        fields = {}
-        for field_name, ftype in field_types.items():
-            if ftype == "unsupported":
-                continue
-            src = field_to_col.get(field_name)
-            if src is None or src not in df.columns:
-                continue
-            val = convert_value(row.get(src), ftype)
-            if val is not None:
-                fields[field_name] = val
-        records.append({"fields": fields})
-    return records
+def rows_to_records(rows: list, field_types: dict, tag: str = "") -> list:
+    """懂火接口 dict 列表 → 飞书 batch_create 记录列表。
 
+    外层迭代「飞书字段名」，直接取同名接口键——无别名、无推导。
+    空值不写（None 会被飞书忽略，等于保留表里原值）。
+    """
+    writable = [c for c, t in field_types.items() if t != "unsupported"]
+    unsupported = [c for c, t in field_types.items() if t == "unsupported"]
+    if unsupported:
+        log(f"[{tag}] 不可写字段（公式/查找/人员/自动）跳过: {', '.join(unsupported)}")
 
-def rows_to_records(rows: list, field_types: dict) -> list:
-    """API 原始 dict 列表 → batch_create 记录列表（④ 往来）"""
+    json_keys = set()
+    for row in rows[:50]:
+        json_keys.update(row.keys())
+    missing = [c for c in writable if c not in json_keys]
+    if missing:
+        log(f"[{tag}] ⚠️ 表里有列但接口无此键，该列将留空: {', '.join(missing)}")
+    unused = sorted(json_keys - set(writable) - {"id"})
+    if unused:
+        log(f"[{tag}] 接口有键但表里没列，不入表: {', '.join(unused)}")
+
     records = []
     for row in rows:
         fields = {}
-        for col, ftype in field_types.items():
-            val = convert_value(row.get(col), ftype)
+        for col in writable:
+            val = convert_value(row.get(col), field_types[col])
             if val is not None:
                 fields[col] = val
         records.append({"fields": fields})
     return records
-
 
 # ============ ⑤ 客户：增量计划（与单脚本一致）============
 
@@ -858,48 +667,50 @@ def kehu_plan(donghuo_rows: list, feishu_records: list) -> dict:
             "to_mark_deleted": to_mark_deleted, "unchanged": unchanged,
             "total_donghuo": len(dh_map), "total_feishu": len(feishu_records)}
 
-
 # ============ 各部分飞书写入（返回 stats dict；失败 raise）============
 
 def run_full_replace(token: str, part: str, payload: dict) -> dict:
-    """全量替换：清空 → 写入（①②③④⑥ 共用）"""
-    table_id = TABLES[part]
-    log(f"[{PART_NAMES[part]}] 飞书写入开始 ...")
+    """全量替换：预检 → 清空 → 写入（①②③④⑥⑦⑧⑨ 共用；② 走动态字段探测）
+
+    顺序刻意是「先预检、后清空」：字段映射若有问题，5 条预检就会失败并抛出，
+    此时表里原数据一条没动；而不是删光了才发现写不进去（那才是真正的灾难）。
+    """
+    spec, name = PARTS[part], PARTS[part]["name"]
+    table_id = table_id_of(part)
+
+    if spec.get("dynamic"):
+        field_types = bitable_get_field_types(token, table_id)
+        writable = [k for k, v in field_types.items() if v != "unsupported"]
+        log(f"[{name}] 动态字段探测: {len(field_types)} 个字段，可写 {len(writable)} 个")
+    else:
+        field_types = spec["fields"]
+
+    records = rows_to_records(payload["rows"], field_types, name)
+    if not records:
+        raise RuntimeError(f"{name}：待写入记录 0 条，拒绝清空现有数据")
+
+    # 预检：先拿 5 条试写，验证字段名/类型/选项都通
+    h = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    test_batch = records[:min(5, len(records))]
+    d = requests.post(f"{_records_url(table_id)}/batch_create", headers=h,
+                      json={"records": test_batch}, timeout=60).json()
+    if d.get("code") != 0:
+        raise RuntimeError(f"{name}：预检写入失败（表内原数据未动）: "
+                           f"{d.get('code')} {d.get('msg')} "
+                           f"样本={json.dumps(test_batch[0], ensure_ascii=False)[:400]}")
+    log(f"[{name}] 预检通过（{len(test_batch)} 条）")
+
+    # 预检通过才开始清空 + 全量写入
+    log(f"[{name}] 飞书写入开始 ...")
     existing = bitable_list_records(token, table_id)
     ids = [r["record_id"] for r in existing]
     if ids:
         bitable_batch_delete(token, table_id, ids)
-    log(f"[{PART_NAMES[part]}] 已清空旧记录 {len(ids)} 条")
+    log(f"[{name}] 已清空旧记录 {len(ids)} 条")
 
-    if part == "dingdan":
-        field_types = bitable_get_field_types(token, table_id)
-        writable = [k for k, v in field_types.items() if v != "unsupported"]
-        log(f"[{PART_NAMES[part]}] 动态字段探测: {len(field_types)} 个字段，可写 {len(writable)} 个")
-        records = df_to_records(payload["df"], field_types, DINGDAN_ALIASES)
-    elif part == "chuku":
-        records = df_to_records(payload["df"], CHUKU_FIELD_TYPES)
-    elif part == "yingshou":
-        records = df_to_records(payload["df"], YINGSHOU_FIELD_TYPES)
-    elif part == "xsdd":
-        records = df_to_records(payload["df"], XSDD_FIELD_TYPES)
-    else:  # wanglai
-        records = rows_to_records(payload["rows"], WANGLAI_FIELD_TYPES)
-
-    # 预检：先写 5 条验证字段映射
-    test_batch = records[:min(5, len(records))]
-    h = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    r = requests.post(f"{_records_url(table_id)}/batch_create", headers=h,
-                      json={"records": test_batch}, timeout=60)
-    d = r.json()
-    if d.get("code") != 0:
-        raise RuntimeError(f"预检写入失败: {d.get('code')} {d.get('msg')} 样本={json.dumps(test_batch[0], ensure_ascii=False)[:400]}")
-    remaining = records[len(test_batch):]
-    written = len(test_batch)
-    if remaining:
-        written += bitable_batch_create(token, table_id, remaining)
-    log(f"[{PART_NAMES[part]}] ✅ 写入完成 {written} 条")
+    written = bitable_batch_create(token, table_id, records)
+    log(f"[{name}] ✅ 写入完成 {written} 条")
     return {"cleared": len(ids), "written": written}
-
 
 def run_kehu_incremental(token: str, payload: dict) -> dict:
     """⑤ 客户：增量写入 + 已删除标记（与单脚本一致）"""
@@ -979,26 +790,38 @@ def run_kehu_fix_owner(token: str) -> int:
     log(f"[⑤ 客户] ✅ 已处理 {done} 条")
     return done
 
-
 # ============ 汇总通知卡片 ============
+
+def _time_md(res: dict) -> str:
+    """各模块用时后缀。取数=fetch_all 拉全量；写入=飞书清空+落库。
+    CSV 备份夹在中间，是全体共用的批次步骤，不计进任何单个模块。"""
+    f = res.get("fetch_s")
+    if f is None:
+        return ""
+    w = res.get("write_s")
+    if w is None:
+        return f" · ⏱ {f:.1f}s（取数 {f:.1f}s，未写入）"
+    return f" · ⏱ {f + w:.1f}s（取数 {f:.1f}s ／ 写入 {w:.1f}s）"
+
 
 def _part_line_md(key: str, res: dict) -> str:
     """单部分一行的 markdown 文本"""
     name = PART_NAMES[key]
     if not res.get("ok"):
         err = (res.get("error") or "未知错误").replace("\n", " ")
-        return f"**{name}** ❌ 失败\n{err[:200]}"
+        return f"**{name}** ❌ 失败{_time_md(res)}\n{err[:200]}"
     s = res.get("stats") or {}
     if key == "kehu":
         extra = f" · 补参与+请复检 {s.get('fixed_owner', 0)}" if s.get("fixed_owner") else ""
         return (f"**{name}** ✅ 新增 {s.get('created', 0)} · 更新 {s.get('updated', 0)} · "
                 f"标记删除 {s.get('marked_deleted', 0)} · 恢复 {s.get('restored', 0)} · "
-                f"无变化 {s.get('unchanged', 0)}{extra}")
-    return (f"**{name}** ✅ 清空 {s.get('cleared', 0)} 条 · 写入 {s.get('written', 0)} 条")
+                f"无变化 {s.get('unchanged', 0)}{extra}{_time_md(res)}")
+    return (f"**{name}** ✅ 清空 {s.get('cleared', 0)} 条 · 写入 {s.get('written', 0)} 条"
+            f"{_time_md(res)}")
 
 
 def build_summary_card(results: dict, elapsed_s: float) -> dict:
-    """5 部分汇总卡片：全成功绿 / 部分失败橙 / 全失败红"""
+    """九合一汇总卡片：全成功绿 / 部分失败橙 / 全失败红"""
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     total = len(results)
     ok_cnt = sum(1 for r in results.values() if r.get("ok"))
@@ -1044,160 +867,255 @@ def build_summary_card(results: dict, elapsed_s: float) -> dict:
             "elements": elements}
 
 
+
+# ============ 建表 / 字段对照表 ============
+
+def bitable_list_tables(token: str) -> list:
+    """列出 base 下所有表 [{table_id, name}, ...]"""
+    h = {"Authorization": f"Bearer {token}"}
+    url = f"{FEISHU_OPEN_BASE}/bitable/v1/apps/{BITABLE_APP_TOKEN}/tables"
+    out, page_token = [], None
+    while True:
+        qs = "page_size=100" + (f"&page_token={page_token}" if page_token else "")
+        d = requests.get(f"{url}?{qs}", headers=h, timeout=30).json()
+        if d.get("code") != 0:
+            raise RuntimeError(f"获取表列表失败: {d}")
+        dd = d.get("data") or {}
+        out.extend(dd.get("items") or [])
+        if not dd.get("has_more") or not dd.get("page_token"):
+            break
+        page_token = dd.get("page_token")
+    return out
+
+
+def table_id_of(part: str) -> str:
+    """取该部分的飞书 table_id；写 ensure 的按表名现场解析（结果缓存）"""
+    spec = PARTS[part]
+    if spec.get("table"):
+        return spec["table"]
+    if part not in _ENSURED:
+        want = spec["ensure"]
+        found = {t["name"]: t["table_id"] for t in bitable_list_tables(feishu_token())}
+        if want not in found:
+            raise RuntimeError(f"飞书里没有「{want}」表 —— 先跑 --ensure-tables 建表")
+        _ENSURED[part] = found[want]
+        log(f"[{spec['name']}] 按表名定位到「{want}」→ {found[want]}")
+    return _ENSURED[part]
+
+
+def ensure_tables(token: str, dry_run: bool = False) -> dict:
+    """按表名幂等引导 ⑦⑧⑨ 三张新表：已有就用，没有就一次建表带全部字段。
+    字段名 1:1 照抄懂火接口，不做任何翻译；首字段即主字段，必须是文本。"""
+    existing = {t["name"]: t["table_id"] for t in bitable_list_tables(token)}
+    resolved = {}
+    for part in PART_ORDER:
+        spec = PARTS[part]
+        want = spec.get("ensure")
+        if not want:
+            continue
+        if want in existing:
+            resolved[part] = existing[want]
+            log(f"[建表] {spec['name']}: 已存在「{want}」 → {existing[want]}（跳过）")
+            continue
+        fields = [{"field_name": f, "type": _STRATEGY_TO_CREATE_CODE[t]}
+                  for f, t in spec["fields"].items()]
+        log(f"[建表] {spec['name']}: 新建「{want}」，{len(fields)} 个字段 ...")
+        if dry_run:
+            for i, f in enumerate(fields, 1):
+                log(f"      {i:>2}. {f['field_name']:<12} type={f['type']}")
+            resolved[part] = "<dry-run>"
+            continue
+        h = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        url = f"{FEISHU_OPEN_BASE}/bitable/v1/apps/{BITABLE_APP_TOKEN}/tables"
+        d = requests.post(url, headers=h, timeout=60,
+                          json={"table": {"name": want, "default_view_name": "表格",
+                                          "fields": fields}}).json()
+        if d.get("code") != 0:
+            raise RuntimeError(f"建表「{want}」失败: {d.get('code')} {d.get('msg')}")
+        tid = (d.get("data") or {}).get("table_id")
+        resolved[part] = tid
+        log(f"[建表] ✅ 已建「{want}」 → {tid}")
+        got = bitable_get_field_types(token, tid)
+        log(f"[建表] 回读校验：{len(got)} 个字段 → {', '.join(got)}")
+    return resolved
+
+
+def check_fields(session, token: str, to_markdown: bool = False) -> int:
+    """只读：逐模块核对「飞书列 ↔ 接口键 ↔ 脚本映射」，输出告警 + 对照表。
+    返回发现的问题数（0 = 干净）。"""
+    problems = 0
+    md = ["# 九合一字段对照表", "",
+          f"生成时间：{datetime.datetime.now():%Y-%m-%d %H:%M:%S}", "",
+          "> 由 `python 懂火出库同步/Update_Data.py --check-fields --markdown` 生成。",
+          "> 约定：**飞书列名 == 懂火接口键名**，脚本不做任何别名或强行映射；",
+          "> 名字不一致时以接口键名为准，去改飞书表里的列名。", ""]
+    for part in PART_ORDER:
+        spec, name = PARTS[part], PARTS[part]["name"]
+        try:
+            keys = probe_json_keys(session, part)
+        except Exception as e:
+            log(f"[对照] {name}: ❌ 接口不可用（{type(e).__name__}: {e}）")
+            md += [f"## {name}", "", f"❌ 接口不可用：`{e}`", ""]
+            problems += 1
+            continue
+        try:
+            table_id = table_id_of(part)
+            feishu = bitable_get_field_types(token, table_id)
+        except Exception as e:
+            log(f"[对照] {name}: ⚠️ 读飞书字段失败（{e}）")
+            md += [f"## {name}", "",
+                   f"⚠️ 读飞书字段失败：`{e}`", "",
+                   f"接口返回 {len(keys)} 键：{', '.join(f'`{k}`' for k in keys)}", ""]
+            problems += 1
+            continue
+
+        # ② 动态探测、⑤ 增量：映射就取飞书表现有字段；其余用硬编码映射
+        effective = feishu if (spec.get("dynamic") or spec.get("incremental")) else spec["fields"]
+        writable = {c: t for c, t in effective.items() if t != "unsupported"}
+        unsupported = [c for c, t in effective.items() if t == "unsupported"]
+        no_source = [c for c in writable if c not in keys]
+        no_column = [k for k in keys if k not in effective and k != "id"]
+        not_in_feishu = [c for c in effective if c not in feishu]
+
+        log(f"[对照] {name}: 接口 {len(keys)} 键 / 可写映射 {len(writable)} 列 / 表里 {len(feishu)} 字段"
+            + ("（动态探测）" if spec.get("dynamic") else ""))
+        if unsupported:
+            log(f"[对照]   不可写（自动跳过）: {', '.join(unsupported)}")
+        if no_source:
+            log(f"[对照]   ⬜ 表里有列、接口无键 → 留空: {', '.join(no_source)}")
+        if no_column:
+            log(f"[对照]   ➖ 接口有键、表里无列 → 不入表: {', '.join(no_column)}")
+        if not_in_feishu:
+            log(f"[对照]   ⚠️ [WARN] 脚本映射了但飞书表里没这列: {', '.join(not_in_feishu)}")
+            problems += 1
+
+        md += [f"## {name}", "",
+               f"- 接口返回 **{len(keys)}** 键 ｜ 飞书表 **{len(feishu)}** 字段 ｜ 可写 **{len(writable)}** 列",
+               ""]
+        if unsupported:
+            md.append(f"- 不可写（自动跳过）：{', '.join(f'`{c}`' for c in unsupported)}")
+        if no_source:
+            md.append(f"- ⬜ **表里有列、接口无键 → 该列留空**：{', '.join(f'`{c}`' for c in no_source)}")
+        if no_column:
+            md.append(f"- ➖ 接口有键、表里无列 → 不入表：{', '.join(f'`{k}`' for k in no_column)}")
+        if not_in_feishu:
+            md.append(f"- ⚠️ **脚本映射了但飞书表里没这列（写不进去）**："
+                      f"{', '.join(f'`{c}`' for c in not_in_feishu)}")
+        md += ["", "| 飞书列 | 接口键 | 写入策略 | 状态 |", "|---|---|---|---|"]
+        for c, t in effective.items():
+            if t == "unsupported":
+                st = "不可写，跳过"
+            elif c not in keys:
+                st = "⬜ 接口无此键，留空"
+            elif c not in feishu:
+                st = "⚠️ 飞书表无此列"
+            else:
+                st = "✅ 同名直连"
+            md.append(f"| {c} | {'—' if c not in keys else c} | {t} | {st} |")
+        for k in no_column:
+            md.append(f"| — | {k} | — | ➖ 表里无列 |")
+        md.append("")
+
+    if to_markdown:
+        MD_PATH.write_text("\n".join(md) + "\n", encoding="utf-8")
+        log(f"[对照] 📄 对照表已写出: {MD_PATH}")
+    log(f"[对照] 结论: {'✅ 无问题' if problems == 0 else f'⚠️ {problems} 处需要关注'}")
+    return problems
+
+
+
 # ============ 主流程 ============
 
 def main():
-    ap = argparse.ArgumentParser(description="懂火 6 合 1 同步工作流")
-    ap.add_argument("--headless", action="store_true", help="headless Chrome（默认 headed；--ci 自动开启）")
-    ap.add_argument("--ci", action="store_true",
-                    help="GitHub Actions 环境：用 playwright chromium 替代真 Chrome，自动 --headless")
-    ap.add_argument("--skip-download", action="store_true",
-                    help="UI 导出部分复用 downloads/all/ 下各部分最新 xls（不启动浏览器；④⑤ 自动退回 requests 登录）")
-    ap.add_argument("--dry-run", action="store_true", help="取数+解析+CSV+打印计划，不写飞书")
+    ap = argparse.ArgumentParser(description="懂火 9 合 1 数据汇总同步（纯 JSON 接口，零浏览器）")
+    ap.add_argument("--dry-run", action="store_true", help="取数 + 落 CSV + 打印计划，不写飞书")
     ap.add_argument("--no-notify", action="store_true", help="不发飞书通知")
     ap.add_argument("--only", default="", help=f"只跑部分：逗号分隔 {','.join(PART_ORDER)}")
+    ap.add_argument("--check-fields", action="store_true",
+                    help="只读：核对字段对照表并输出告警（需先登录懂火）")
+    ap.add_argument("--markdown", action="store_true", help="配合 --check-fields，写出对照表 .md")
+    ap.add_argument("--ensure-tables", action="store_true", help="幂等建 ⑦⑧⑨ 三张新表（按表名查，缺则建）")
     args = ap.parse_args()
 
     t0 = time.time()
-    only = {s.strip() for s in args.only.split(",") if s.strip()} or set(PART_NAMES)
-    invalid = only - set(PART_NAMES)
+    only = {s.strip() for s in args.only.split(",") if s.strip()} or set(PART_ORDER)
+    invalid = only - set(PART_ORDER)
     if invalid:
-        raise SystemExit(f"--only 含未知部分: {invalid}（可选: {list(PART_NAMES)}）")
-    ui_parts = [p for p in UI_PARTS if p in only]
-    api_parts = [p for p in API_PARTS if p in only]
-    results = {k: {"ok": False, "error": None, "stats": None} for k in PART_ORDER if k in only}
+        raise SystemExit(f"--only 含未知部分: {invalid}（可选: {PART_ORDER}）")
 
-    log(f"==== 懂火 {len(PART_ORDER)} 合 1 同步工作流启动（部分: {sorted(only)}）====")
+    # ---- 只读模式：建表 / 字段对照表 ----
+    if args.check_fields or args.ensure_tables:
+        log(f"==== 懂火九合一 · {'字段对照' if args.check_fields else '建表'} 模式 ====")
+        token = feishu_token()
+        if args.ensure_tables:
+            ensure_tables(token, dry_run=args.dry_run)
+        if args.check_fields:
+            session = login_donghuo()
+            if session is None:
+                raise SystemExit("懂火登录失败（字段对照需要读接口键名）")
+            rc = check_fields(session, token, to_markdown=args.markdown)
+            log(f"==== 对照完成，耗时 {time.time() - t0:.1f}s ====")
+            return rc
+        log(f"==== 建表完成，耗时 {time.time() - t0:.1f}s ====")
+        return 0
+
+    log(f"==== 懂火 {len(PART_ORDER)} 合 1 同步（纯 JSON）启动（部分: {sorted(only)}）====")
     username, password = env("DH_USERNAME"), env("DH_PASSWORD")
     if not username or not password:
         raise SystemExit("缺少 DH_USERNAME / DH_PASSWORD（.env）")
 
-    # ---- Phase 1: 浏览器登录一次 + ①②③ UI 导出 ----
-    xls_paths = {}
-    api_session = None
-    if ui_parts and not args.skip_download:
-        import ddddocr
-        import playwright.sync_api as pw
-        ocr = ddddocr.DdddOcr(show_ad=False)
-        for f in DOWNLOAD_DIR.iterdir():
-            if f.is_file():
-                f.unlink()
-        log("[浏览器] 启动 Chrome 并登录（全程仅此一次）...")
-        browser = None
-        try:
-            with pw.sync_playwright() as p:
-                # CI 环境用 playwright chromium（Ubuntu runner 无 Chrome），本地用真 Chrome
-                launch_kwargs = {"headless": args.headless or args.ci,
-                                 "args": ["--disable-blink-features=AutomationControlled"]}
-                if not args.ci:
-                    launch_kwargs["channel"] = "chrome"
-                browser = p.chromium.launch(**launch_kwargs)
-                ctx = browser.new_context(accept_downloads=True)
-                page = ctx.new_page()
-                browser_login(page, ocr, username, password)
-                # 登录态固定，立即提取 cookies 给 ④⑤ API 用（防浏览器中途挂掉）
-                api_session = session_from_browser(ctx)
-                log("[浏览器] ✅ cookies 已提取（④⑤ API 复用此登录态）")
-                exporters = {"chuku": export_chuku, "dingdan": export_dingdan,
-                             "yingshou": export_yingshou, "xsdd": export_xsdd}
-                for part in ui_parts:
-                    try:
-                        xls_paths[part] = exporters[part](page)
-                    except Exception as e:
-                        results[part]["error"] = f"UI 导出失败: {e}"
-                        log(f"[{PART_NAMES[part]}] ❌ {e}")
-                        if page.is_closed():
-                            for rest in ui_parts[ui_parts.index(part) + 1:]:
-                                results[rest]["error"] = "浏览器已关闭，导出中断"
-                            break
-        except Exception as e:
-            log(f"[浏览器] ❌ 登录/浏览器失败: {e}")
-            for part in ui_parts:
-                if not results[part]["error"]:
-                    results[part]["error"] = f"浏览器登录失败: {e}"
-        finally:
-            if browser:
-                try:
-                    browser.close()
-                except Exception:
-                    pass
-    elif ui_parts:
-        # --skip-download：复用已有 xls（按 {part}__ 前缀找最新）
-        for part in ui_parts:
-            files = sorted(DOWNLOAD_DIR.glob(f"{part}__*.xls"),
-                           key=lambda x: x.stat().st_mtime, reverse=True)
-            if files:
-                xls_paths[part] = files[0]
-                log(f"[{PART_NAMES[part]}] [跳过下载] 复用: {files[0].name}")
-            else:
-                results[part]["error"] = f"--skip-download 但 downloads/all/ 下没有 {part}__*.xls"
+    results = {k: {"ok": False, "error": None, "stats": None, "fetch_s": None, "write_s": None}
+               for k in PART_ORDER if k in only}
 
-    # ---- Phase 2: ④⑤ API 拉取（cookie session 或退回 donghuo_login）----
+    # ---- Phase 1: 懂火登录一次（之后 8 个模块复用同一个 session）----
+    log("[懂火] 登录中（全程仅此一次）...")
+    session = login_donghuo()
+    if session is None:
+        raise SystemExit("懂火登录失败，终止")
+
+    # ---- Phase 2: 逐模块拉全量 JSON（每模块独立 try，互不阻断）----
     rows_data = {}
-    if api_parts:
-        if api_session is None:
-            log("[API] 未走浏览器（--skip-download 或浏览器失败），退回 donghuo_login.py 登录...")
-            api_session = login_donghuo()
-        if api_session is None:
-            for part in api_parts:
-                results[part]["error"] = "懂火 requests 登录失败（④⑤ 均无法拉取）"
-        else:
-            fetchers = {"wanglai": fetch_wanglai, "kehu": fetch_kehu}
-            for part in api_parts:
-                try:
-                    rows_data[part] = fetchers[part](api_session)
-                except Exception as e:
-                    results[part]["error"] = f"API 拉取失败: {e}"
-                    log(f"[{PART_NAMES[part]}] ❌ {e}")
-
-    # ---- Phase 3: 解析 + CSV 备份 ----
-    payload = {}   # key -> {"df"? , "rows"?, "csv"}
-    for part in UI_PARTS:
-        if part not in xls_paths:
+    for part in PART_ORDER:
+        if part not in only:
             continue
+        t_part = time.time()
         try:
-            df, csv_path = xls_to_df(xls_paths[part], part)
-            if len(df) == 0:
-                raise RuntimeError("导出文件解析后为空")
-            payload[part] = {"df": df, "csv": csv_path}
+            rows_data[part] = fetch_all(session, part)
         except Exception as e:
-            results[part]["error"] = results[part]["error"] or f"解析失败: {e}"
-            log(f"[{PART_NAMES[part]}] ❌ 解析失败: {e}")
-    for part in API_PARTS:
+            results[part]["error"] = f"接口拉取失败: {e}"
+            log(f"[{PARTS[part]['name']}] ❌ {e}")
+        finally:
+            results[part]["fetch_s"] = time.time() - t_part
+
+    # ---- Phase 3: CSV 备份 ----
+    payload = {}
+    for part in PART_ORDER:
         if part not in rows_data:
             continue
         try:
             if not rows_data[part]:
                 raise RuntimeError("接口返回空")
-            csv_path = rows_to_csv(rows_data[part], part)
-            payload[part] = {"rows": rows_data[part], "csv": csv_path}
+            payload[part] = {"rows": rows_data[part], "csv": rows_to_csv(rows_data[part], part)}
         except Exception as e:
             results[part]["error"] = results[part]["error"] or f"CSV 备份失败: {e}"
-            log(f"[{PART_NAMES[part]}] ❌ {e}")
+            log(f"[{PARTS[part]['name']}] ❌ {e}")
 
-    # ---- dry-run：打印各部分统计 + ⑤ 客户增量计划，到此为止 ----
+    # ---- dry-run：打印统计 + ⑤ 客户增量计划，到此为止 ----
     if args.dry_run:
         log("==== DRY-RUN 结果（不写飞书，CSV 全部保留）====")
-        for part in UI_PARTS:
+        for part in PART_ORDER:
             if part not in only:
                 continue
+            name = PARTS[part]["name"]
             if part in payload:
-                df = payload[part]["df"]
-                log(f"  {PART_NAMES[part]}: {len(df)} 行，列={list(df.columns)[:8]}...")
+                keys = list(payload[part]["rows"][0].keys())
+                log(f"  {name}: {len(payload[part]['rows'])} 行 × {len(keys)} 键")
             else:
-                log(f"  {PART_NAMES[part]}: ❌ {results[part]['error']}")
-        for part in API_PARTS:
-            if part not in only:
-                continue
-            if part in payload:
-                log(f"  {PART_NAMES[part]}: {len(payload[part]['rows'])} 行")
-            else:
-                log(f"  {PART_NAMES[part]}: ❌ {results[part]['error']}")
+                log(f"  {name}: ❌ {results[part]['error']}")
         if "kehu" in payload:
             try:
                 token = feishu_token()
-                fs = bitable_list_records(token, TABLES["kehu"])
-                plan = kehu_plan(payload["kehu"]["rows"], fs)
+                plan = kehu_plan(payload["kehu"]["rows"], bitable_list_records(token, TABLES["kehu"]))
                 log(f"  ⑤ 客户增量计划: 新增 {len(plan['to_create'])} · 更新 {len(plan['to_update'])} · "
                     f"标记删除 {len(plan['to_mark_deleted'])} · 恢复 {len(plan['to_restore'])} · "
                     f"无变化 {plan['unchanged']}")
@@ -1215,31 +1133,31 @@ def main():
         for part in PART_ORDER:
             if part not in payload:
                 continue
+            name = PARTS[part]["name"]
+            t_part = time.time()
             try:
-                if part == "kehu":
+                if PARTS[part].get("incremental"):
                     stats = run_kehu_incremental(token, payload[part])
-                    # 后处理：补参与 + 标记请复检（在增量同步成功后跑；失败则跳过）
-                    if args.dry_run:
-                        log("[⑤ 客户] [DRY-RUN] 跳过补参与后处理")
-                    else:
-                        try:
-                            fixed = run_kehu_fix_owner(token)
-                            stats["fixed_owner"] = fixed
-                        except Exception as e2:
-                            log(f"[⑤ 客户] ⚠️ 补参与后处理异常（不阻断主流程）: {e2}")
-                            stats["fixed_owner"] = 0
+                    try:
+                        stats["fixed_owner"] = run_kehu_fix_owner(token)
+                    except Exception as e2:
+                        log(f"[{name}] ⚠️ 补参与后处理异常（不阻断主流程）: {e2}")
+                        stats["fixed_owner"] = 0
                 else:
                     stats = run_full_replace(token, part, payload[part])
                 results[part].update(ok=True, stats=stats)
-                # 该部分全部成功 → 删它的 CSV
                 csv_p = payload[part]["csv"]
                 if csv_p.exists():
                     csv_p.unlink()
-                    log(f"[{PART_NAMES[part]}] [清理] CSV 已删除: {csv_p.name}")
+                    log(f"[{name}] [清理] CSV 已删除: {csv_p.name}")
             except Exception as e:
                 results[part]["error"] = f"飞书写入失败: {e}"
-                log(f"[{PART_NAMES[part]}] ❌ 写入失败: {e}")
+                log(f"[{name}] ❌ 写入失败: {e}")
                 log(f"    {traceback.format_exc(limit=3)}")
+            finally:
+                results[part]["write_s"] = time.time() - t_part
+                log(f"[{name}] ⏱ 取数 {results[part]['fetch_s']:.1f}s"
+                    f" + 写入 {results[part]['write_s']:.1f}s")
 
     elapsed = time.time() - t0
     ok_cnt = sum(1 for r in results.values() if r.get("ok"))
@@ -1248,14 +1166,12 @@ def main():
     # ---- Phase 5: 汇总通知（一张卡）----
     if not args.no_notify:
         try:
-            notify_token = feishu_token()
             feishu_send_card(FEISHU_NOTIFY_UNION_ID,
-                             build_summary_card(results, elapsed), notify_token)
+                             build_summary_card(results, elapsed), feishu_token())
         except Exception as e:
             log(f"[飞书通知] ⚠️ 发送异常: {e}")
 
     return 0 if ok_cnt == len(results) else (2 if ok_cnt == 0 else 1)
-
 
 if __name__ == "__main__":
     sys.exit(main())

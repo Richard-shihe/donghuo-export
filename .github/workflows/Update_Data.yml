@@ -1,4 +1,4 @@
-name: 数据汇总 Update_Data（6 合 1 同步）
+name: "数据汇总 Update_Data（9 合 1 · 全 JSON 接口）"
 
 on:
   workflow_dispatch:
@@ -8,16 +8,17 @@ on:
         required: false
         default: "手动立即触发"
 
-# 并发控制：同一时刻只跑一个实例（避免多实例抢懂火登录态 / 飞书写入冲突）
+# 并发控制：与 Update_Data_legacy.yml 共用同一个组名，
+# 保证新旧脚本绝不同时全量替换同一批飞书表（全量替换是先删后建，撞车会互相清空）。
 concurrency:
-  group: update-data-6in1
+  group: update-data-sync
   cancel-in-progress: false
 
 jobs:
   sync-all:
-    name: 登录懂火 → 6 模块合并导出 → 飞书写入 → 汇总通知
+    name: 懂火登录 → 9 模块接口取数 → 飞书写入 → 汇总通知
     runs-on: ubuntu-latest
-    # 5 合 1 实测 804s；⑥ 多一次 UI 导出（2489 行）+ 一次写入，留足余量
+    # 本地实测 2026-10-03：8 模块取数 ≈238s + 8 张表写入 ≈500s；⑨ 库存 1101 行再 +15s
     timeout-minutes: 30
 
     steps:
@@ -34,11 +35,22 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: 安装 Playwright Chromium
-        run: |
-          python -m playwright install chromium --with-deps
+      # 不再安装 Playwright：全 JSON 接口取数，零浏览器
+      # （登录验证码仍走 ddddocr，已含在 requirements.txt 里）
 
-      - name: 运行 Update_Data 六合一同步
+      # 幂等建表：⑦采购订单 / ⑧采购明细 / ⑨库存 三张自动引导表，
+      # 存在就跳过（只列一次表），缺了就按注册表里的字段表建。
+      # 放在同步之前，避免同步跑到那一步才因为「表不存在」整块失败。
+      - name: 幂等引导新表（⑦⑧⑨）
+        # 尽力而为：这一步失败不该拖垮整个 run —— 同步脚本对每个模块是独立 try，
+        # 表真有问题时只有 ⑦⑧⑨ 三块报错，①②③④⑤⑥ 照常同步。
+        continue-on-error: true
+        env:
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+        run: python 懂火出库同步/Update_Data.py --ensure-tables
+
+      - name: 运行 Update_Data 九合一同步
         env:
           # ===== 懂火系统账号（仓库 Secrets） =====
           DH_USERNAME: ${{ secrets.DH_USERNAME }}
@@ -48,15 +60,21 @@ jobs:
           FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
           FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
 
-          # 时区
+          # 时区：① 出库筛选的 end_time 取「今天」，UTC runner 不设会差一天
           TZ: "Asia/Shanghai"
-        run: |
-          python 懂火出库同步/Update_Data.py --ci
-          EXIT_CODE=$?
-          echo "脚本退出码: $EXIT_CODE"
-          exit $EXIT_CODE
+        run: python 懂火出库同步/Update_Data.py
+
+      # 失败时把已拉到的原始数据留成证据（runner 结束后就没了）
+      - name: 失败时保留 CSV 证据
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: csv_backup
+          path: 懂火出库同步/csv_backup/
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: 失败时告警
         if: failure()
         run: |
-          echo "::warning:: 懂火 6 合 1 同步失败，请检查 Secrets（DH_USERNAME/DH_PASSWORD/FEISHU_APP_ID/FEISHU_APP_SECRET）或懂火网站状态"
+          echo "::warning:: 懂火 9 合 1 同步失败，请检查 Secrets（DH_USERNAME/DH_PASSWORD/FEISHU_APP_ID/FEISHU_APP_SECRET）或懂火网站状态"
