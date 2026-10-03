@@ -48,7 +48,7 @@ jobs:
         env:
           FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
           FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
-        run: python 懂火出库同步/Update_Data.py --ensure-tables
+        run: python 数据汇总/Update_Data.py --ensure-tables
 
       - name: 运行 Update_Data 九合一同步
         env:
@@ -62,7 +62,7 @@ jobs:
 
           # 时区：① 出库筛选的 end_time 取「今天」，UTC runner 不设会差一天
           TZ: "Asia/Shanghai"
-        run: python 懂火出库同步/Update_Data.py
+        run: python 数据汇总/Update_Data.py
 
       # 失败时把已拉到的原始数据留成证据（runner 结束后就没了）
       - name: 失败时保留 CSV 证据
@@ -70,7 +70,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: csv_backup
-          path: 懂火出库同步/csv_backup/
+          path: 数据汇总/csv_backup/
           if-no-files-found: ignore
           retention-days: 7
 

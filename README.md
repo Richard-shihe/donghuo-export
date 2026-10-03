@@ -14,7 +14,7 @@ A/
 ├── requirements.txt          # 全仓库 Python 依赖
 ├── .env                      # 本地凭据（gitignore，脚本向上查找）
 │
-├── 懂火出库同步/             # 项目：数据汇总（9 合 1 同步，全 JSON 接口零浏览器）
+├── 数据汇总/             # 项目：数据汇总（9 合 1 同步，全 JSON 接口零浏览器）
 ├── 懂火出库导出/             # 项目：出库记录导出 → 飞书云盘/邮件
 ├── 懂火加工单同步/           # 项目：加工单双向同步（懂火 ↔ 飞书多维表）
 ├── 懂火每周全量备份/         # 项目：10 类业务数据每周备份 → 飞书云盘
@@ -36,7 +36,7 @@ A/
 
 | 项目文件夹 | 业务 | Workflow |
 |---|---|---|
-| 懂火出库同步/ | 懂火 **9 模块**（出库/销售明细/应收/往来/客户/销售订单/采购订单/采购明细/库存）→ 飞书多维表，一次登录批量写入。**全 JSON 接口、零浏览器**；加模块只改脚本里的 `PARTS` 注册表 | `Update_Data.yml`、`Update_Data_legacy.yml`（回滚备用）、`sync_chuku_to_bitable.yml`（旧版单模块） |
+| 数据汇总/ | 懂火 **9 模块**（出库/销售明细/应收/往来/客户/销售订单/采购订单/采购明细/库存）→ 飞书多维表，一次登录批量写入。**全 JSON 接口、零浏览器**；加模块只改脚本里的 `PARTS` 注册表 | `Update_Data.yml`、`Update_Data_legacy.yml`（回滚备用）、`sync_chuku_to_bitable.yml`（旧版单模块） |
 | 懂火出库导出/ | 懂火出库记录 → CSV → 飞书云盘/邮件 | `export.yml` |
 | 懂火加工单同步/ | 加工单导出到飞书 + 加工成品写回懂火 | `export_jiagong.yml`、`import_jiagong.yml` |
 | 懂火每周全量备份/ | 10 类业务数据 → XLSX → 飞书云盘，周报通知 | `backup_all.yml` |
@@ -71,7 +71,7 @@ pip install -r requirements.txt
 # DH_USERNAME / DH_PASSWORD / FEISHU_APP_ID / FEISHU_APP_SECRET / ...
 
 # 例：手动跑数据汇总
-python 懂火出库同步/Update_Data.py
+python 数据汇总/Update_Data.py
 
 # 例：本地全量出库导出（含 CSV 备份到 DATA UPDATE/）
 python "DATA UPDATE/run_full_chuku_export.py"

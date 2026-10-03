@@ -946,7 +946,7 @@ def check_fields(session, token: str, to_markdown: bool = False) -> int:
     problems = 0
     md = ["# 九合一字段对照表", "",
           f"生成时间：{datetime.datetime.now():%Y-%m-%d %H:%M:%S}", "",
-          "> 由 `python 懂火出库同步/Update_Data.py --check-fields --markdown` 生成。",
+          "> 由 `python 数据汇总/Update_Data.py --check-fields --markdown` 生成。",
           "> 约定：**飞书列名 == 懂火接口键名**，脚本不做任何别名或强行映射；",
           "> 名字不一致时以接口键名为准，去改飞书表里的列名。", ""]
     for part in PART_ORDER:

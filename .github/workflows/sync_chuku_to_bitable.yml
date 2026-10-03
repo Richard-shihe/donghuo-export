@@ -50,7 +50,7 @@ jobs:
           # 时区
           TZ: "Asia/Shanghai"
         run: |
-          python 懂火出库同步/sync_chuku_to_bitable.py --headless
+          python 数据汇总/sync_chuku_to_bitable.py --headless
           EXIT_CODE=$?
           echo "脚本退出码: $EXIT_CODE"
           exit $EXIT_CODE

@@ -24,7 +24,7 @@ sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 
 from dotenv import load_dotenv
-load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=False)  # .env 统一放仓库根目录（本脚本在子文件夹 懂火出库同步/ 内）
+load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=False)  # .env 统一放仓库根目录（本脚本在子文件夹 数据汇总/ 内）
 
 # ===== 固定配置 =====
 BITABLE_APP_TOKEN = "VahHb3YDBaBTwTsCjeAcaAhhnHc"   # 数据汇总（2026）

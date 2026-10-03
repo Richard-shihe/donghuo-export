@@ -52,7 +52,7 @@ jobs:
           # 时区
           TZ: "Asia/Shanghai"
         run: |
-          python 懂火出库同步/Update_Data_legacy.py --ci
+          python 数据汇总/Update_Data_legacy.py --ci
           EXIT_CODE=$?
           echo "脚本退出码: $EXIT_CODE"
           exit $EXIT_CODE
