@@ -1,4 +1,4 @@
-name: 数据汇总 Update_Data（5 合 1 同步）
+name: 数据汇总 Update_Data（6 合 1 同步）
 
 on:
   workflow_dispatch:
@@ -10,14 +10,15 @@ on:
 
 # 并发控制：同一时刻只跑一个实例（避免多实例抢懂火登录态 / 飞书写入冲突）
 concurrency:
-  group: update-data-5in1
+  group: update-data-6in1
   cancel-in-progress: false
 
 jobs:
   sync-all:
-    name: 登录懂火 → 5 模块合并导出 → 飞书写入 → 汇总通知
+    name: 登录懂火 → 6 模块合并导出 → 飞书写入 → 汇总通知
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # 5 合 1 实测 804s；⑥ 多一次 UI 导出（2489 行）+ 一次写入，留足余量
+    timeout-minutes: 30
 
     steps:
       - name: 检出代码
@@ -37,7 +38,7 @@ jobs:
         run: |
           python -m playwright install chromium --with-deps
 
-      - name: 运行 Update_Data 五合一同步
+      - name: 运行 Update_Data 六合一同步
         env:
           # ===== 懂火系统账号（仓库 Secrets） =====
           DH_USERNAME: ${{ secrets.DH_USERNAME }}
@@ -58,4 +59,4 @@ jobs:
       - name: 失败时告警
         if: failure()
         run: |
-          echo "::warning:: 懂火 5 合 1 同步失败，请检查 Secrets（DH_USERNAME/DH_PASSWORD/FEISHU_APP_ID/FEISHU_APP_SECRET）或懂火网站状态"
+          echo "::warning:: 懂火 6 合 1 同步失败，请检查 Secrets（DH_USERNAME/DH_PASSWORD/FEISHU_APP_ID/FEISHU_APP_SECRET）或懂火网站状态"

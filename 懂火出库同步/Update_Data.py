@@ -1,22 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-懂火 5 合 1 数据汇总同步工作流（一次登录 · 五部分合并执行 · 一张汇总通知卡）
+懂火 6 合 1 数据汇总同步工作流（一次登录 · 六部分合并执行 · 一张汇总通知卡）
 
-把 懂火出库同步/ 下 5 个独立脚本的流程合并成一次运行：
+把 懂火出库同步/ 下各模块的流程合并成一次运行：
 
   部分     模块               取数方式                        目标表(数据汇总 2026)   同步语义
   ─────────────────────────────────────────────────────────────────────────────────────────
   ① 出库   出库记录           Playwright UI 导出(2026-01-01起)  tblolnj06JZkYNiU      全量替换
   ② 订单   订单明细汇总        Playwright UI 导出(出库状态=全部)  tblcEZoQatk7lCAO      全量替换
-  ③ 应收   应收结算           Playwright UI 导出(清空开始日期)   tblpjne9dIuif5HD      全量替换
+  ③ 应收   应收汇总(客户级)    Playwright UI 导出(无筛选条件)     tblpjne9dIuif5HD      全量替换
   ④ 往来   收付款流水          getlist API(确认状态=全部)        tblbS1dPaDVL3GY8      全量替换
   ⑤ 客户   客户管理 CRM        getlist API(筛选全空)            tblCE7zIWs804RR5      增量+已删除标记
+  ⑥ 销售订单 销售订单          Playwright UI 导出(出库状态=全部)  tblJZIyNXoe8PZer      全量替换
 
 【一次登录的实现】
   - Playwright 真 Chrome 登录一次（ddddocr 识别验证码）
   - 登录成功后立即从 browser context 提取 cookies（登录态固定，后续导航不影响）
-  → 同一浏览器依次完成 ①②③ 三个 UI 导出（导出按钮是纯前端交互，requests 点不了）
+  → 同一浏览器依次完成 ①②③⑥ 四个 UI 导出（导出按钮是纯前端交互，requests 点不了）
   → cookies 注入 requests.Session 调 ④⑤ getlist 接口（与页面表格同一数据源，非扒网页）
   - 若 cookie 注入不被接受或未走浏览器（--skip-download），④⑤ 自动退回 donghuo_login.py
   - 客户模块「导出」按钮被部署方禁用（khdown 首行 return false + 服务端返回"没有权限"，
@@ -27,10 +28,10 @@
   成功部分上传后自动删 CSV；失败部分 CSV 保留在 csv_backup/ 备查。
   结束发一张汇总卡片给洪：全成功绿 / 部分失败橙 / 全失败红，附失败详情与客户删除名单。
 
-使用：python sync_all_to_bitable.py [--headless] [--skip-download] [--dry-run] [--no-notify]
-                                    [--only chuku,dingdan,yingshou,wanglai,kehu]
+使用：python Update_Data.py [--headless] [--skip-download] [--dry-run] [--no-notify]
+                            [--only chuku,dingdan,yingshou,wanglai,kehu,xsdd]
 凭据：仓库根目录 .env 里的 DH_USERNAME / DH_PASSWORD + FEISHU_APP_ID / FEISHU_APP_SECRET
-（各模块的字段映射/筛选逻辑与 5 个单脚本完全一致，单脚本仍可独立运行）
+（①②④⑤⑥ 的字段映射/筛选逻辑与对应单脚本一致；③ 已于 2026-10-02 由「应收结算」改造为「应收汇总」）
 """
 import sys, os, json, time, re, math, datetime, argparse, traceback, requests
 from pathlib import Path
@@ -53,23 +54,32 @@ DONGHUO_LOGIN  = f"{DONGHUO_BASE}/view/admin/v_login"
 DONGHUO_URLS = {
     "chuku":    f"{DONGHUO_BASE}/view/admin/xiaoshou/v_xjlall",     # 出库记录
     "dingdan":  f"{DONGHUO_BASE}/view/admin/xiaoshou/v_xmxhz",      # 订单明细汇总
-    "yingshou": f"{DONGHUO_BASE}/view/admin/caiwu/v_x_jiesuan",     # 应收结算
+    # ③ 应收汇总：「应收管理」容器页 v_x_ifram 里第二个 Tab 的内容页（2026-10-02 由 应收结算 改造而来）
+    "yingshou": f"{DONGHUO_BASE}/view/admin/caiwu/v_x_yinshou",     # 应收汇总
     "wanglai":  f"{DONGHUO_BASE}/model/admin/caiwu/m_liushui/getlist",  # 往来流水 API
     "kehu":     f"{DONGHUO_BASE}/model/admin/crm/m_kehu/getlist",   # 客户管理 API
+    # ⑥ 销售订单：「销售订单」容器页 v_ifram_dd 里第一个 Tab 的内容页（2026-10-02 实测可直达）
+    "xsdd":     f"{DONGHUO_BASE}/view/admin/xiaoshou/v_dindan",     # 销售订单
 }
 
 BITABLE_APP_TOKEN = "VahHb3YDBaBTwTsCjeAcaAhhnHc"   # 数据汇总（2026）
 TABLES = {
     "chuku":    "tblolnj06JZkYNiU",
     "dingdan":  "tblcEZoQatk7lCAO",
-    "yingshou": "tblpjne9dIuif5HD",
+    "yingshou": "tblpjne9dIuif5HD",   # 「应收」表（2026-10-02 由 应收结算 改为 应收汇总，9 字段）
     "wanglai":  "tblbS1dPaDVL3GY8",
     "kehu":     "tblCE7zIWs804RR5",
+    "xsdd":     "tblJZIyNXoe8PZer",   # 「订单数据」表（2026-10-02 建好 17 字段）
 }
 PART_NAMES = {
-    "chuku": "① 出库记录", "dingdan": "② 订单明细", "yingshou": "③ 应收结算",
-    "wanglai": "④ 往来流水", "kehu": "⑤ 客户管理",
+    "chuku": "① 出库记录", "dingdan": "② 订单明细", "yingshou": "③ 应收汇总",
+    "wanglai": "④ 往来流水", "kehu": "⑤ 客户管理", "xsdd": "⑥ 销售订单",
 }
+
+# 部分清单（新增模块改这三行 + 上面的 3 个字典即可，流程/卡片都是从这里派生的）
+UI_PARTS   = ["chuku", "dingdan", "yingshou", "xsdd"]                     # Playwright 点「导出」按钮
+API_PARTS  = ["wanglai", "kehu"]                                          # getlist 接口
+PART_ORDER = ["chuku", "dingdan", "yingshou", "wanglai", "kehu", "xsdd"]  # 卡片/日志展示顺序
 
 EXPORT_START_DATE = "2026-01-01"   # ① 出库筛选起始日期
 PAGE_SIZE = 300                    # ④⑤ getlist 单页上限
@@ -104,12 +114,13 @@ FIELD_TYPE_CODE_MAP = {   # 飞书字段类型码 → 写入策略；其余（Us
 }
 
 # ③ 应收：硬编码映射 + df 层面列名 rename（2026-09-06 探测）
+# ③ 应收汇总：客户级汇总（非订单级），2026-10-02 由「应收结算」改造
+# 表里另有「参与」= Lookup(客户表→参与人)：飞书 API 不许新建/修改 Lookup（type 19 不在白名单），
+# 它已由用户在界面上改指本表主字段「客户名称」，脚本无需写入、也不能写入
 YINGSHOU_FIELD_TYPES = {
-    "订单 号": "text", "日期": "datetime", "发货状态": "text", "所属公司": "text",
-    "销售人": "text", "客户名称": "text", "实发重量": "number", "实发金额": "number",
-    "销售费用": "number", "其它款项": "number", "已结金额": "number", "未结金额": "number",
+    "客户名称": "text", "所属公司": "text", "销售人": "text",
+    "应收款": "number", "实收款": "number", "可结算": "number", "未收款": "number",
 }
-YINGSHOU_ALIASES = {"订单号": "订单 号", "销售状态": "发货状态"}
 
 # ④ 往来：硬编码映射（2026-09-06 探测）
 WANGLAI_FIELD_TYPES = {
@@ -117,6 +128,15 @@ WANGLAI_FIELD_TYPES = {
     "交易类型": "text", "科目名称": "text", "结算方式": "text", "金额": "number",
     "状态": "text", "结算对方": "text", "订单号": "text", "销售人": "text",
     "备注说明": "text", "提交人": "text", "确认人": "text",
+}
+
+# ⑥ 销售订单：硬编码映射（2026-10-02 按实例导出文件核对，17 列与「订单数据」表字段 1:1，无需别名）
+XSDD_FIELD_TYPES = {
+    "订单号": "text", "所属公司": "text", "日期": "datetime", "发货状态": "text",
+    "销售人": "text", "客户名称": "text", "订单重量": "number", "订单金额": "number",
+    "实发重量": "number", "实发金额": "number", "销售费用": "number", "其它款项": "number",
+    "合同定金": "number", "已结金额": "number", "未结金额": "number", "合同未结": "number",
+    "新增时间": "datetime",
 }
 
 # ⑤ 客户：主键=客户名称；跟踪字段；仅新增写创建时间；已删除标记
@@ -412,48 +432,57 @@ def export_dingdan(page) -> Path:
 
 
 def export_yingshou(page) -> Path:
-    """③ 应收结算：筛选清空开始日期 → 系统导出按钮（与单脚本逻辑一致）"""
+    """③ 应收汇总：直接点系统导出按钮（全量）
+
+    2026-10-02 由「应收结算」改造而来。这一页没有「筛选」弹层，查询条件只有
+    所属公司/销售人/客户名称，也没有任何日期条件 —— 不填就是全量，
+    所以不用像 ① 那样清日期、也不用像 ②⑥ 那样设下拉，打开即可导出。
+    """
     page.goto(DONGHUO_URLS["yingshou"], wait_until="domcontentloaded", timeout=30000)
-    page.wait_for_timeout(4000)
-    page.get_by_text("筛选", exact=True).first.click()
-    page.wait_for_timeout(1500)
-    result = page.evaluate("""() => {
-        const startEl = document.getElementById('start_time');
-        if (startEl) {
-            startEl.removeAttribute('readonly');
-            startEl.value = '';
-            startEl.setAttribute('readonly', 'readonly');
-            startEl.dispatchEvent(new Event('change', {bubbles: true}));
-            startEl.dispatchEvent(new Event('blur', {bubbles: true}));
-        }
-        return {start: startEl ? startEl.value : '(无此输入框)'};
-    }""")
-    log(f"[③ 应收] ✅ 开始日期已清空: {result}")
-    clicked = False
-    try:
-        page.get_by_text("查询", exact=True).first.click(timeout=5000)
-        clicked = True
-    except Exception:
-        pass
-    if not clicked:
-        btns = page.evaluate("""
-        () => Array.from(document.querySelectorAll('button.layui-btn'))
-          .map((b, i) => {
-            const r = b.getBoundingClientRect();
-            return {idx: i, cls: b.className, y: Math.round(r.top),
-                    rect: [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)]};
-          })
-          .filter(b => b.rect[2] > 0 && b.rect[3] > 0)
-        """)
-        popup_btns = [b for b in btns if b["y"] > 500]
-        confirm = next((b for b in popup_btns if "close" not in b["cls"]), None)
-        if confirm is None:
-            confirm = popup_btns[0] if popup_btns else (btns[0] if btns else None)
-        if confirm is None:
-            raise RuntimeError("③ 应收：筛选弹窗未找到查询按钮")
-        page.locator("button.layui-btn").nth(confirm["idx"]).click()
-    page.wait_for_timeout(2500)
+    page.wait_for_timeout(5000)
     return _export_via_download(page, page, DOWNLOAD_DIR, "yingshou", 300000)
+
+
+def export_xsdd(page) -> Path:
+    """⑥ 销售订单：筛选 出库状态=全部 → 系统导出按钮（与 ② 同属「销售订单」模块，逻辑一致）
+
+    该页默认把「已完成」的订单排除在外（2026-10-02 实测：默认导出 880 行，缺的正是
+    1609 条「已完成」；显式设为「全部」后 2489 行 = 与人工导出逐条完全一致），
+    所以这里必须点一次筛选，不能直接点导出。
+    """
+    page.goto(DONGHUO_URLS["xsdd"], wait_until="domcontentloaded", timeout=30000)
+    page.wait_for_timeout(4000)
+    owner = _find_owner_for_text(page, "筛选")
+    if owner is None:
+        raise RuntimeError("⑥ 销售订单：页面未找到「筛选」元素（页面结构可能变化）")
+    owner.get_by_text("筛选", exact=True).first.click()
+    page.wait_for_timeout(1500)
+    res = owner.evaluate(JS_SET_SELECT, ["出库状态", "全部"])
+    if res.get("ok"):
+        log(f"[⑥ 销售订单] ✅ 出库状态已设为 '{res.get('text')}'")
+    else:
+        log("[⑥ 销售订单] ⚠️ 原生 select 未命中，尝试 layui 渲染层兜底")
+        try:
+            label_loc = owner.get_by_text("出库状态", exact=True).first
+            parent = label_loc.locator("xpath=..")
+            dd = parent.locator(".layui-form-select").first
+            if dd.count() == 0:
+                dd = owner.locator(".layui-form-select").last
+            dd.locator("input.layui-input, .layui-select-title, .layui-edge").first.click()
+            page.wait_for_timeout(600)
+            clicked = owner.evaluate(JS_CLICK_VISIBLE_OPTION, "全部")
+            page.wait_for_timeout(300)
+            if not clicked:
+                raise RuntimeError("渲染层未见可见的'全部'选项")
+            log("[⑥ 销售订单] ✅ 已通过 layui 渲染层点选 '全部'")
+        except Exception as e:
+            raise RuntimeError(f"⑥ 销售订单：设置 出库状态='全部' 失败: {e}") from e
+    btn = owner.evaluate(JS_PICK_CONFIRM)
+    if btn is None:
+        raise RuntimeError("⑥ 销售订单：筛选面板未找到确认按钮")
+    owner.locator("button.layui-btn, a.layui-btn").nth(btn["idx"]).click()
+    page.wait_for_timeout(2500)
+    return _export_via_download(page, owner, DOWNLOAD_DIR, "xsdd", 300000)
 
 
 # ============ ④⑤ requests：getlist 分页拉取（共用同一 session）============
@@ -513,15 +542,13 @@ def fetch_kehu(session) -> list:
 
 def xls_to_df(xls_path: Path, csv_prefix: str):
     """懂火 HTML 伪 xls → DataFrame + UTF-8-SIG CSV 备份。返回 (df, csv_path)。
-    ③ 应收在 CSV 阶段就完成列名 rename（与单脚本一致）。"""
+    列名一律保持原始导出名，改名交给 df_to_records 的 aliases 处理。"""
     import pandas as pd
     df_raw = pd.read_html(str(xls_path))[0]
     header = list(df_raw.iloc[0])
     df = df_raw.iloc[1:].reset_index(drop=True)
     df.columns = header
     df = df.dropna(how="all")
-    if csv_prefix == "yingshou":
-        df = df.rename(columns=YINGSHOU_ALIASES)
     log(f"[解析] {xls_path.name}: {len(df)} 行 × {len(df.columns)} 列")
     now = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     csv_path = CSV_DIR / f"{csv_prefix}_export_{now}.csv"
@@ -835,7 +862,7 @@ def kehu_plan(donghuo_rows: list, feishu_records: list) -> dict:
 # ============ 各部分飞书写入（返回 stats dict；失败 raise）============
 
 def run_full_replace(token: str, part: str, payload: dict) -> dict:
-    """全量替换：清空 → 写入（①②③④ 共用）"""
+    """全量替换：清空 → 写入（①②③④⑥ 共用）"""
     table_id = TABLES[part]
     log(f"[{PART_NAMES[part]}] 飞书写入开始 ...")
     existing = bitable_list_records(token, table_id)
@@ -853,6 +880,8 @@ def run_full_replace(token: str, part: str, payload: dict) -> dict:
         records = df_to_records(payload["df"], CHUKU_FIELD_TYPES)
     elif part == "yingshou":
         records = df_to_records(payload["df"], YINGSHOU_FIELD_TYPES)
+    elif part == "xsdd":
+        records = df_to_records(payload["df"], XSDD_FIELD_TYPES)
     else:  # wanglai
         records = rows_to_records(payload["rows"], WANGLAI_FIELD_TYPES)
 
@@ -987,7 +1016,7 @@ def build_summary_card(results: dict, elapsed_s: float) -> dict:
         ]},
         {"tag": "hr"},
     ]
-    for key in ["chuku", "dingdan", "yingshou", "wanglai", "kehu"]:
+    for key in PART_ORDER:
         if key in results:
             elements.append({"tag": "div", "text": {"tag": "lark_md", "content": _part_line_md(key, results[key])}})
 
@@ -1007,7 +1036,7 @@ def build_summary_card(results: dict, elapsed_s: float) -> dict:
     elements.append({"tag": "hr"})
     elements.append({"tag": "note", "elements": [{
         "tag": "plain_text",
-        "content": f"飞书多维表「数据汇总（2026）」 ｜ 一次登录 · 5 部分合并同步 ｜ {now}"
+        "content": f"飞书多维表「数据汇总（2026）」 ｜ 一次登录 · {total} 部分合并同步 ｜ {now}"
     }]})
     return {"config": {"wide_screen_mode": True},
             "header": {"template": template,
@@ -1018,15 +1047,15 @@ def build_summary_card(results: dict, elapsed_s: float) -> dict:
 # ============ 主流程 ============
 
 def main():
-    ap = argparse.ArgumentParser(description="懂火 5 合 1 同步工作流")
+    ap = argparse.ArgumentParser(description="懂火 6 合 1 同步工作流")
     ap.add_argument("--headless", action="store_true", help="headless Chrome（默认 headed；--ci 自动开启）")
     ap.add_argument("--ci", action="store_true",
                     help="GitHub Actions 环境：用 playwright chromium 替代真 Chrome，自动 --headless")
     ap.add_argument("--skip-download", action="store_true",
-                    help="①②③ 复用 downloads/all/ 下各部分最新 xls（不启动浏览器；④⑤ 自动退回 requests 登录）")
+                    help="UI 导出部分复用 downloads/all/ 下各部分最新 xls（不启动浏览器；④⑤ 自动退回 requests 登录）")
     ap.add_argument("--dry-run", action="store_true", help="取数+解析+CSV+打印计划，不写飞书")
     ap.add_argument("--no-notify", action="store_true", help="不发飞书通知")
-    ap.add_argument("--only", default="", help="只跑部分：逗号分隔 chuku,dingdan,yingshou,wanglai,kehu")
+    ap.add_argument("--only", default="", help=f"只跑部分：逗号分隔 {','.join(PART_ORDER)}")
     args = ap.parse_args()
 
     t0 = time.time()
@@ -1034,12 +1063,11 @@ def main():
     invalid = only - set(PART_NAMES)
     if invalid:
         raise SystemExit(f"--only 含未知部分: {invalid}（可选: {list(PART_NAMES)}）")
-    ui_parts = [p for p in ["chuku", "dingdan", "yingshou"] if p in only]
-    api_parts = [p for p in ["wanglai", "kehu"] if p in only]
-    results = {k: {"ok": False, "error": None, "stats": None} for k in
-               ["chuku", "dingdan", "yingshou", "wanglai", "kehu"] if k in only}
+    ui_parts = [p for p in UI_PARTS if p in only]
+    api_parts = [p for p in API_PARTS if p in only]
+    results = {k: {"ok": False, "error": None, "stats": None} for k in PART_ORDER if k in only}
 
-    log(f"==== 懂火 5 合 1 同步工作流启动（部分: {sorted(only)}）====")
+    log(f"==== 懂火 {len(PART_ORDER)} 合 1 同步工作流启动（部分: {sorted(only)}）====")
     username, password = env("DH_USERNAME"), env("DH_PASSWORD")
     if not username or not password:
         raise SystemExit("缺少 DH_USERNAME / DH_PASSWORD（.env）")
@@ -1071,7 +1099,7 @@ def main():
                 api_session = session_from_browser(ctx)
                 log("[浏览器] ✅ cookies 已提取（④⑤ API 复用此登录态）")
                 exporters = {"chuku": export_chuku, "dingdan": export_dingdan,
-                             "yingshou": export_yingshou}
+                             "yingshou": export_yingshou, "xsdd": export_xsdd}
                 for part in ui_parts:
                     try:
                         xls_paths[part] = exporters[part](page)
@@ -1124,7 +1152,7 @@ def main():
 
     # ---- Phase 3: 解析 + CSV 备份 ----
     payload = {}   # key -> {"df"? , "rows"?, "csv"}
-    for part in ["chuku", "dingdan", "yingshou"]:
+    for part in UI_PARTS:
         if part not in xls_paths:
             continue
         try:
@@ -1135,7 +1163,7 @@ def main():
         except Exception as e:
             results[part]["error"] = results[part]["error"] or f"解析失败: {e}"
             log(f"[{PART_NAMES[part]}] ❌ 解析失败: {e}")
-    for part in ["wanglai", "kehu"]:
+    for part in API_PARTS:
         if part not in rows_data:
             continue
         try:
@@ -1150,7 +1178,7 @@ def main():
     # ---- dry-run：打印各部分统计 + ⑤ 客户增量计划，到此为止 ----
     if args.dry_run:
         log("==== DRY-RUN 结果（不写飞书，CSV 全部保留）====")
-        for part in ["chuku", "dingdan", "yingshou"]:
+        for part in UI_PARTS:
             if part not in only:
                 continue
             if part in payload:
@@ -1158,7 +1186,7 @@ def main():
                 log(f"  {PART_NAMES[part]}: {len(df)} 行，列={list(df.columns)[:8]}...")
             else:
                 log(f"  {PART_NAMES[part]}: ❌ {results[part]['error']}")
-        for part in ["wanglai", "kehu"]:
+        for part in API_PARTS:
             if part not in only:
                 continue
             if part in payload:
@@ -1184,7 +1212,7 @@ def main():
     if payload:
         log("[飞书] 获取 tenant_access_token ...")
         token = feishu_token()
-        for part in ["chuku", "dingdan", "yingshou", "wanglai", "kehu"]:
+        for part in PART_ORDER:
             if part not in payload:
                 continue
             try:
