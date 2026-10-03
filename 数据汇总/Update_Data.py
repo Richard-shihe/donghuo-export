@@ -437,6 +437,32 @@ def _fs_session() -> requests.Session:
     return s
 
 
+# 飞书「偶发」业务错误码：HTTP 200，错误码藏在 body 的 code 里 —— 上面 urllib3 那层
+# Retry 只看 HTTP 状态码，拦不住它们，必须在这里自己退避重试。
+#   1254607 Data not ready, please try again later（表/索引正在重建，官方原话就是「稍后重试」）
+#   1254291 Write conflict（并发写期间的读也可能撞上）
+# ⚠️ 只有 GET 能用它 —— 读记录 / 读字段 / 列表 都是幂等的。
+#    POST 绝不能这样重试：batch_create 若「实际成功但响应超时」，重试会重复写入。
+_TRANSIENT_READ_CODES = {1254607, 1254291}
+
+
+def _fs_get(url: str, headers: dict, timeout: int = 60, tries: int = 4) -> dict:
+    """飞书 GET：幂等，遇偶发业务错误自动退避重试，返回解析后的 JSON。"""
+    delay = 2.0
+    for attempt in range(1, tries + 1):
+        d = _fs_session().get(url, headers=headers, timeout=timeout).json()
+        code = d.get("code")
+        if code == 0 or code not in _TRANSIENT_READ_CODES:
+            return d
+        if attempt == tries:
+            log(f"[飞书] ❌ 读取偶发错误重试 {tries} 次仍失败: {code} {d.get('msg')}")
+            return d
+        log(f"[飞书] ⏳ 读取偶发错误 {code} {d.get('msg')} —— {delay:.0f}s 后重试（第 {attempt}/{tries - 1} 次）")
+        time.sleep(delay)
+        delay *= 2
+    return {}
+
+
 def _records_url(table_id: str) -> str:
     return f"{FEISHU_OPEN_BASE}/bitable/v1/apps/{BITABLE_APP_TOKEN}/tables/{table_id}/records"
 
@@ -447,8 +473,7 @@ def bitable_list_records(token: str, table_id: str) -> list:
     out, seen, page_token = [], set(), None
     while True:
         qs = f"page_size={BATCH_SIZE}" + (f"&page_token={page_token}" if page_token else "")
-        r = _fs_session().get(f"{_records_url(table_id)}?{qs}", headers=h, timeout=60)
-        data = r.json()
+        data = _fs_get(f"{_records_url(table_id)}?{qs}", h)
         if data.get("code") != 0:
             raise RuntimeError(f"list records 失败({table_id}): {data}")
         d = data.get("data") or {}
@@ -524,8 +549,7 @@ def bitable_get_field_types(token: str, table_id: str) -> dict:
     out, page_token = {}, None
     while True:
         qs = "page_size=100" + (f"&page_token={page_token}" if page_token else "")
-        r = _fs_session().get(f"{url}?{qs}", headers=h, timeout=60)
-        d = r.json()
+        d = _fs_get(f"{url}?{qs}", h)
         if d.get("code") != 0:
             raise RuntimeError(f"获取字段列表失败: {d}")
         dd = d.get("data") or {}
@@ -927,7 +951,7 @@ def bitable_list_tables(token: str) -> list:
     out, page_token = [], None
     while True:
         qs = "page_size=100" + (f"&page_token={page_token}" if page_token else "")
-        d = _fs_session().get(f"{url}?{qs}", headers=h, timeout=60).json()
+        d = _fs_get(f"{url}?{qs}", h)
         if d.get("code") != 0:
             raise RuntimeError(f"获取表列表失败: {d}")
         dd = d.get("data") or {}
@@ -1078,6 +1102,18 @@ def check_fields(session, token: str, to_markdown: bool = False) -> int:
 
 # ============ 并发写入（表级并发：不同飞书表可同时写，同一张表必须串行）============
 
+def _is_tail_part(part: str) -> bool:
+    """该模块是否要留到最后串行收尾（不进线程池）。
+
+    ⑤ 客户是唯一的增量模块，且它第一步就读自己的表。而 ②③④ 都有一个
+    `参与`(Lookup) 指向⑤ —— 它们被批量重写时，飞书要重算这些 Lookup，
+    ⑤ 期间会短暂返回 `1254607 Data not ready`（2026-10-03 CI 实测踩到）。
+    串行版里②③④在⑤之前写完，这个窗口不存在，是并发引入的新问题。
+    所以⑤不进池，等其它表全部写完后由主线程单独跑（它很小，基本不占时长）。
+    """
+    return bool(PARTS[part].get("incremental"))
+
+
 def _write_part(token: str, part: str, payload_part: dict) -> dict:
     """单个模块的飞书写入 —— 线程池任务单元，也是单模块内联执行的同一个入口。
 
@@ -1203,8 +1239,10 @@ def main():
         if args.workers > 1 and len(tids) > 1:
             n = min(args.workers, len(tids))
             pool = ThreadPoolExecutor(max_workers=n)
+            tail = [PARTS[p]["name"] for p in PART_ORDER if _is_tail_part(p) and p in tids]
             log(f"[飞书] 并发写表：{n} 个线程"
-                f"{'（流水线：取完一个就写一个）' if not args.no_pipeline else '（--no-pipeline：全部取完再写）'}")
+                f"{'（流水线：取完一个就写一个）' if not args.no_pipeline else '（--no-pipeline：全部取完再写）'}"
+                + (f"，{'/'.join(tail)} 留到最后串行收尾" if tail else ""))
         else:
             log("[飞书] 串行写入（未启用并发）")
 
@@ -1231,10 +1269,10 @@ def main():
 
         if args.dry_run or part not in tids:
             continue
-        if pool is not None and not args.no_pipeline:
+        if pool is not None and not args.no_pipeline and not _is_tail_part(part):
             futs[pool.submit(_write_part, token, part, payload[part])] = part
         else:
-            pending.append(part)   # 未进池（--no-pipeline / 串行模式），稍后统一写
+            pending.append(part)   # 未进池（--no-pipeline / 串行模式 / ⑤ 收尾模块），稍后统一写
 
     # ---- dry-run：打印统计 + ⑤ 客户增量计划，到此为止 ----
     if args.dry_run:
@@ -1264,10 +1302,14 @@ def main():
 
     # ---- Phase 4: 飞书写入 ----
     # --no-pipeline：等取数全部结束后，再把待写模块一次性并发提交
+    # ⑤ 等收尾模块（_is_tail_part）无论哪种模式都不进池，留在 pending 里最后由主线程串行跑
     if pool is not None and pending:
+        deferred = [p for p in pending if _is_tail_part(p)]
         for part in pending:
+            if _is_tail_part(part):
+                continue
             futs[pool.submit(_write_part, token, part, payload[part])] = part
-        pending = []
+        pending = deferred
 
     # 主线程消费已完成的任务：results 只在这里被写，天然无竞态
     for fut in as_completed(futs):
