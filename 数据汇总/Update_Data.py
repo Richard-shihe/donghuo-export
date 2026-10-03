@@ -40,16 +40,30 @@ rtotal 时该模块直接判失败——全量替换是先删后建，拿残缺�
 【失败隔离】
 9 个模块各自独立 try，互不阻断；⑤ 客户是增量模式，只标记删除不真删。
 
+【并发（2026-10-03 提速改造）】
+飞书**同一张表不支持并发写**（并发写报 1254291 Write conflict），但**跨表可以并发**。
+所以并发粒度是「表」：9 张表各占一个线程、表内严格串行。配套三条：
+  · 进池前断言本次要写的 table_id 互不相同（防未来有人让两个模块指向同一张表）；
+  · results 只在主线程写，worker 只返回结构化结果、绝不把异常抛给 future；
+  · 飞书 POST 一律不挂自动重试（batch_create 若「成功但响应超时」，重试会重复写入）。
+另外取数顺序改为 FETCH_ORDER（写入量降序），让最慢的 ① 最早开工。
+⚠️ 流水线模式下「取数一个、写一个」，所以取数中途整体崩掉时，先取完的模块可能已经写完。
+   这不是新语义——各模块本来就是独立 try、失败的模块不写成功的照写，只是时序更早。
+
 使用：
-  python Update_Data.py [--dry-run] [--no-notify] [--only a,b,...]
+  python Update_Data.py [--dry-run] [--no-notify] [--only a,b,...] [--workers N] [--no-pipeline]
   python Update_Data.py --check-fields [--markdown]     # 只读：字段对照表 / 安全闸
   python Update_Data.py --ensure-tables [--dry-run]     # 幂等建 ⑦⑧⑨ 三张新表
+回滚：--workers 1 --no-pipeline 等价于改造前的串行行为。
 
 凭据：仓库根目录 .env 里的 DH_USERNAME / DH_PASSWORD + FEISHU_APP_ID / FEISHU_APP_SECRET
 """
-import sys, os, json, time, re, math, datetime, argparse, traceback, requests
+import sys, os, json, time, re, math, datetime, argparse, traceback, threading, requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from collections import defaultdict
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # ===== stdout/stderr 编码双保险（Windows subprocess 里 print emoji 会崩）=====
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -243,10 +257,22 @@ PART_NAMES = {k: v["name"] for k, v in PARTS.items()}
 TABLES = {k: v["table"] for k, v in PARTS.items() if v.get("table")}
 _ENSURED = {}   # 运行时按表名解析出来的 table_id 缓存：{part: table_id}
 
+# 取数顺序 = 写入量降序。流水线模式下每张表「取数一结束就开始写」，
+# 让行数最大的 ① 最早开工，整条链最短（卡片与 results 顺序仍用 PART_ORDER）。
+FETCH_ORDER = ["chuku", "dingdan", "wanglai", "cgmx", "cgdd", "xsdd", "kucun", "yingshou", "kehu"]
+assert set(FETCH_ORDER) == set(PART_ORDER), "FETCH_ORDER 与 PART_ORDER 不一致（加模块时漏了？）"
+
+DEFAULT_WORKERS = 6   # 并发写表的线程数；① 出库（≈162s）是硬下界，4 个已到底，6 是到达不齐的余量
+
 # ============ 工具函数 ============
 
+_LOG_LOCK = threading.Lock()
+
+
 def log(msg: str):
-    print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
+    # 单线程时行为与不加锁完全一致；并发写表时保证整行日志不被别的线程劈开
+    with _LOG_LOCK:
+        print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
 def env(name: str) -> str:
@@ -387,6 +413,30 @@ def rows_to_csv(rows: list, csv_prefix: str) -> Path:
     return csv_path
 # ============ 飞书多维表通用（table_id 参数化）============
 
+# HTTP 连接复用：每个线程各持一个 Session（requests.Session 本身不是线程安全的，
+# 用 threading.local 让并发写表的线程各自复用自己的 TCP 连接，仍能省掉反复 TLS 握手）。
+#
+# ⚠️ POST 绝不能挂 status/read 重试：batch_create 若「实际成功但响应超时」，
+#    自动重试会造成重复写入（飞书侧没有幂等键）。只有 GET（读记录 / 读字段 / 列表）
+#    是幂等的，才允许自动重试。connect 类重试对 POST 也生效，但连接失败 = 请求从未发出，
+#    属于安全重试，故保留。
+_TLS = threading.local()
+
+
+def _fs_session() -> requests.Session:
+    s = getattr(_TLS, "session", None)
+    if s is None:
+        s = requests.Session()
+        retry = Retry(total=3, connect=2, read=2, status=2, backoff_factor=0.5,
+                      status_forcelist=[429, 500, 502, 503, 504],
+                      allowed_methods=frozenset(["GET"]))
+        adapter = HTTPAdapter(max_retries=retry, pool_connections=4, pool_maxsize=8)
+        s.mount("http://", adapter)
+        s.mount("https://", adapter)
+        _TLS.session = s
+    return s
+
+
 def _records_url(table_id: str) -> str:
     return f"{FEISHU_OPEN_BASE}/bitable/v1/apps/{BITABLE_APP_TOKEN}/tables/{table_id}/records"
 
@@ -397,7 +447,7 @@ def bitable_list_records(token: str, table_id: str) -> list:
     out, seen, page_token = [], set(), None
     while True:
         qs = f"page_size={BATCH_SIZE}" + (f"&page_token={page_token}" if page_token else "")
-        r = requests.get(f"{_records_url(table_id)}?{qs}", headers=h, timeout=30)
+        r = _fs_session().get(f"{_records_url(table_id)}?{qs}", headers=h, timeout=60)
         data = r.json()
         if data.get("code") != 0:
             raise RuntimeError(f"list records 失败({table_id}): {data}")
@@ -428,7 +478,7 @@ def bitable_batch_delete(token: str, table_id: str, record_ids: list):
     total = len(record_ids)
     for i in range(0, total, BATCH_SIZE):
         batch = record_ids[i:i + BATCH_SIZE]
-        r = requests.post(url, headers=h, json={"records": batch}, timeout=30)
+        r = _fs_session().post(url, headers=h, json={"records": batch}, timeout=90)
         data = r.json()
         if data.get("code") != 0:
             raise RuntimeError(f"batch_delete 失败: {data.get('msg')}")
@@ -442,7 +492,7 @@ def bitable_batch_create(token: str, table_id: str, records: list) -> int:
     total, created = len(records), 0
     for i in range(0, total, BATCH_SIZE):
         batch = records[i:i + BATCH_SIZE]
-        r = requests.post(url, headers=h, json={"records": batch}, timeout=60)
+        r = _fs_session().post(url, headers=h, json={"records": batch}, timeout=90)
         data = r.json()
         if data.get("code") != 0:
             raise RuntimeError(f"batch_create 失败 批 {i // BATCH_SIZE + 1}: {data.get('code')} {data.get('msg')} 样本={str(data)[:300]}")
@@ -457,7 +507,7 @@ def bitable_batch_update(token: str, table_id: str, updates: list) -> int:
     total, done = len(updates), 0
     for i in range(0, total, BATCH_SIZE):
         batch = updates[i:i + BATCH_SIZE]
-        r = requests.post(url, headers=h, json={"records": batch}, timeout=60)
+        r = _fs_session().post(url, headers=h, json={"records": batch}, timeout=90)
         data = r.json()
         if data.get("code") != 0:
             raise RuntimeError(f"batch_update 失败 批 {i // BATCH_SIZE + 1}: {data.get('code')} {data.get('msg')}")
@@ -474,7 +524,7 @@ def bitable_get_field_types(token: str, table_id: str) -> dict:
     out, page_token = {}, None
     while True:
         qs = "page_size=100" + (f"&page_token={page_token}" if page_token else "")
-        r = requests.get(f"{url}?{qs}", headers=h, timeout=30)
+        r = _fs_session().get(f"{url}?{qs}", headers=h, timeout=60)
         d = r.json()
         if d.get("code") != 0:
             raise RuntimeError(f"获取字段列表失败: {d}")
@@ -692,8 +742,8 @@ def run_full_replace(token: str, part: str, payload: dict) -> dict:
     # 预检：先拿 5 条试写，验证字段名/类型/选项都通
     h = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     test_batch = records[:min(5, len(records))]
-    d = requests.post(f"{_records_url(table_id)}/batch_create", headers=h,
-                      json={"records": test_batch}, timeout=60).json()
+    d = _fs_session().post(f"{_records_url(table_id)}/batch_create", headers=h,
+                           json={"records": test_batch}, timeout=90).json()
     if d.get("code") != 0:
         raise RuntimeError(f"{name}：预检写入失败（表内原数据未动）: "
                            f"{d.get('code')} {d.get('msg')} "
@@ -877,7 +927,7 @@ def bitable_list_tables(token: str) -> list:
     out, page_token = [], None
     while True:
         qs = "page_size=100" + (f"&page_token={page_token}" if page_token else "")
-        d = requests.get(f"{url}?{qs}", headers=h, timeout=30).json()
+        d = _fs_session().get(f"{url}?{qs}", headers=h, timeout=60).json()
         if d.get("code") != 0:
             raise RuntimeError(f"获取表列表失败: {d}")
         dd = d.get("data") or {}
@@ -1026,6 +1076,57 @@ def check_fields(session, token: str, to_markdown: bool = False) -> int:
 
 # ============ 主流程 ============
 
+# ============ 并发写入（表级并发：不同飞书表可同时写，同一张表必须串行）============
+
+def _write_part(token: str, part: str, payload_part: dict) -> dict:
+    """单个模块的飞书写入 —— 线程池任务单元，也是单模块内联执行的同一个入口。
+
+    ⚠️ 契约：自己吞掉所有异常、以结构化结果返回，绝不把异常抛给 future。
+       否则 as_completed 循环里某个 future 一抛错，主线程就会跳过其余模块的结果，
+       卡片显示错误、退出码也会不对。
+    """
+    name = PARTS[part]["name"]
+    t = time.time()
+    try:
+        if PARTS[part].get("incremental"):
+            # ⑤ 的增量写入与「补参与」后处理是不可分割的一个单元：
+            # 拆成两个任务会并发写同一张表（1254291 Write conflict）
+            stats = run_kehu_incremental(token, payload_part)
+            try:
+                stats["fixed_owner"] = run_kehu_fix_owner(token)
+            except Exception as e2:
+                log(f"[{name}] ⚠️ 补参与后处理异常（不阻断主流程）: {e2}")
+                stats["fixed_owner"] = 0
+        else:
+            stats = run_full_replace(token, part, payload_part)
+        return {"part": part, "ok": True, "stats": stats, "error": None,
+                "write_s": time.time() - t, "tb": None}
+    except Exception as e:
+        return {"part": part, "ok": False, "stats": None,
+                "error": f"飞书写入失败: {e}", "write_s": time.time() - t,
+                "tb": traceback.format_exc(limit=3)}
+
+
+def _merge(results: dict, part: str, csv_path, r: dict):
+    """把单个模块的写入结果并入 results —— 只在主线程调用，保证 results 无竞态。"""
+    name = PARTS[part]["name"]
+    # write_s 无条件赋值：卡片里每个提交过的模块都要能打出用时
+    results[part].update(ok=bool(r.get("ok")), stats=r.get("stats"), write_s=r.get("write_s"))
+    if r.get("ok"):
+        # 仅写入成功才删 CSV；失败保留作证据（沿用原有 CSV 纪律）
+        if csv_path is not None and Path(csv_path).exists():
+            Path(csv_path).unlink()
+            log(f"[{name}] [清理] CSV 已删除: {Path(csv_path).name}")
+    else:
+        results[part]["error"] = r.get("error") or "未知写入错误"
+        log(f"[{name}] ❌ {results[part]['error']}")
+        if r.get("tb"):
+            log(f"    {r['tb']}")
+    fs, ws = results[part].get("fetch_s"), results[part].get("write_s")
+    log(f"[{name}] ⏱ 取数 " + (f"{fs:.1f}s" if fs is not None else "—")
+        + " + 写入 " + (f"{ws:.1f}s" if ws is not None else "—"))
+
+
 def main():
     ap = argparse.ArgumentParser(description="懂火 9 合 1 数据汇总同步（纯 JSON 接口，零浏览器）")
     ap.add_argument("--dry-run", action="store_true", help="取数 + 落 CSV + 打印计划，不写飞书")
@@ -1035,6 +1136,11 @@ def main():
                     help="只读：核对字段对照表并输出告警（需先登录懂火）")
     ap.add_argument("--markdown", action="store_true", help="配合 --check-fields，写出对照表 .md")
     ap.add_argument("--ensure-tables", action="store_true", help="幂等建 ⑦⑧⑨ 三张新表（按表名查，缺则建）")
+    ap.add_argument("--workers", type=int, default=DEFAULT_WORKERS,
+                    help=f"并发写表的线程数（默认 {DEFAULT_WORKERS}，上限 9）。"
+                         f"1 = 串行写，配合 --no-pipeline 等价于改造前的行为")
+    ap.add_argument("--no-pipeline", action="store_true",
+                    help="关掉取写流水线：仍然并发写表，但先把 9 个模块全部取完才开始写")
     args = ap.parse_args()
 
     t0 = time.time()
@@ -1067,38 +1173,68 @@ def main():
     results = {k: {"ok": False, "error": None, "stats": None, "fetch_s": None, "write_s": None}
                for k in PART_ORDER if k in only}
 
-    # ---- Phase 1: 懂火登录一次（之后 8 个模块复用同一个 session）----
+    # ---- Phase 1: 懂火登录一次（之后各模块复用同一个 session）----
     log("[懂火] 登录中（全程仅此一次）...")
     session = login_donghuo()
     if session is None:
         raise SystemExit("懂火登录失败，终止")
 
-    # ---- Phase 2: 逐模块拉全量 JSON（每模块独立 try，互不阻断）----
-    rows_data = {}
-    for part in PART_ORDER:
+    # ---- 写入侧准备（dry-run 不需要）----
+    token, tids, pool = None, {}, None
+    if not args.dry_run:
+        # 流水线模式下取数中途就要提交写入任务，token 必须提前拿
+        log("[飞书] 获取 tenant_access_token ...")
+        token = feishu_token()
+        # 单线程预解析 ⑦⑧⑨ 的 table_id（这几张要按表名现场查），
+        # 避免多个写表线程同时首次解析同一个模块
+        log("[飞书] 解析目标表 id ...")
+        for part in PART_ORDER:
+            if part not in only:
+                continue
+            try:
+                tids[part] = table_id_of(part)
+            except Exception as e:
+                results[part]["error"] = f"定位飞书表失败: {e}"
+                log(f"[{PARTS[part]['name']}] ❌ {e}")
+        # 机械保险：飞书同一张表不支持并发写（1254291 Write conflict）。
+        # 一旦两个模块指向同一张表就直接拦下，而不是等线上偶发写冲突
+        if len(set(tids.values())) != len(tids):
+            raise SystemExit(f"多个模块指向同一张飞书表，会触发写冲突: {tids}")
+        if args.workers > 1 and len(tids) > 1:
+            n = min(args.workers, len(tids))
+            pool = ThreadPoolExecutor(max_workers=n)
+            log(f"[飞书] 并发写表：{n} 个线程"
+                f"{'（流水线：取完一个就写一个）' if not args.no_pipeline else '（--no-pipeline：全部取完再写）'}")
+        else:
+            log("[飞书] 串行写入（未启用并发）")
+
+    # ---- Phase 2+3+4: 逐模块 取数 → 落 CSV → 提交写入（每模块独立 try，互不阻断）----
+    # 取数顺序用 FETCH_ORDER（写入量降序）：让最慢的 ① 最早开始写，整条链最短
+    payload, futs, pending = {}, {}, []
+    for part in FETCH_ORDER:
         if part not in only:
             continue
         t_part = time.time()
         try:
-            rows_data[part] = fetch_all(session, part)
-        except Exception as e:
-            results[part]["error"] = f"接口拉取失败: {e}"
-            log(f"[{PARTS[part]['name']}] ❌ {e}")
-        finally:
-            results[part]["fetch_s"] = time.time() - t_part
-
-    # ---- Phase 3: CSV 备份 ----
-    payload = {}
-    for part in PART_ORDER:
-        if part not in rows_data:
-            continue
-        try:
-            if not rows_data[part]:
+            rows = fetch_all(session, part)
+            results[part]["fetch_s"] = time.time() - t_part   # 只计接口翻页，CSV 落盘另算
+            if not rows:
                 raise RuntimeError("接口返回空")
-            payload[part] = {"rows": rows_data[part], "csv": rows_to_csv(rows_data[part], part)}
+            # CSV 先落盘、后写飞书（顺序不变）；取数与落盘都成功才进 payload
+            payload[part] = {"rows": rows, "csv": rows_to_csv(rows, part)}
         except Exception as e:
-            results[part]["error"] = results[part]["error"] or f"CSV 备份失败: {e}"
+            if results[part]["fetch_s"] is None:
+                results[part]["fetch_s"] = time.time() - t_part
+            results[part]["error"] = results[part]["error"] or f"取数/CSV 失败: {e}"
             log(f"[{PARTS[part]['name']}] ❌ {e}")
+            continue
+
+        if args.dry_run or part not in tids:
+            continue
+        if pool is not None and not args.no_pipeline:
+            futs[pool.submit(_write_part, token, part, payload[part])] = part
+        else:
+            pending.append(part)   # 未进池（--no-pipeline / 串行模式），稍后统一写
 
     # ---- dry-run：打印统计 + ⑤ 客户增量计划，到此为止 ----
     if args.dry_run:
@@ -1126,38 +1262,29 @@ def main():
         log(f"==== DRY-RUN 完成，耗时 {time.time() - t0:.1f}s ====")
         return 0
 
-    # ---- Phase 4: 飞书写入（每部分独立 try，互不阻断）----
-    if payload:
-        log("[飞书] 获取 tenant_access_token ...")
-        token = feishu_token()
-        for part in PART_ORDER:
-            if part not in payload:
-                continue
-            name = PARTS[part]["name"]
-            t_part = time.time()
-            try:
-                if PARTS[part].get("incremental"):
-                    stats = run_kehu_incremental(token, payload[part])
-                    try:
-                        stats["fixed_owner"] = run_kehu_fix_owner(token)
-                    except Exception as e2:
-                        log(f"[{name}] ⚠️ 补参与后处理异常（不阻断主流程）: {e2}")
-                        stats["fixed_owner"] = 0
-                else:
-                    stats = run_full_replace(token, part, payload[part])
-                results[part].update(ok=True, stats=stats)
-                csv_p = payload[part]["csv"]
-                if csv_p.exists():
-                    csv_p.unlink()
-                    log(f"[{name}] [清理] CSV 已删除: {csv_p.name}")
-            except Exception as e:
-                results[part]["error"] = f"飞书写入失败: {e}"
-                log(f"[{name}] ❌ 写入失败: {e}")
-                log(f"    {traceback.format_exc(limit=3)}")
-            finally:
-                results[part]["write_s"] = time.time() - t_part
-                log(f"[{name}] ⏱ 取数 {results[part]['fetch_s']:.1f}s"
-                    f" + 写入 {results[part]['write_s']:.1f}s")
+    # ---- Phase 4: 飞书写入 ----
+    # --no-pipeline：等取数全部结束后，再把待写模块一次性并发提交
+    if pool is not None and pending:
+        for part in pending:
+            futs[pool.submit(_write_part, token, part, payload[part])] = part
+        pending = []
+
+    # 主线程消费已完成的任务：results 只在这里被写，天然无竞态
+    for fut in as_completed(futs):
+        part = futs[fut]
+        try:
+            r = fut.result()
+        except BaseException as e:   # 理论不可达（_write_part 自己兜底），防 write_s 丢失
+            r = {"part": part, "ok": False, "stats": None,
+                 "error": f"写入线程异常: {e}", "write_s": None,
+                 "tb": traceback.format_exc(limit=3)}
+        _merge(results, part, payload.get(part, {}).get("csv"), r)
+    if pool is not None:
+        pool.shutdown(wait=True)
+
+    # 串行模式 / --only 单模块：主线程内联跑同一个 _write_part，行为与池内完全一致
+    for part in pending:
+        _merge(results, part, payload[part]["csv"], _write_part(token, part, payload[part]))
 
     elapsed = time.time() - t0
     ok_cnt = sum(1 for r in results.values() if r.get("ok"))

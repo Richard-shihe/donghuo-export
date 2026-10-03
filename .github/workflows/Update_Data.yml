@@ -18,8 +18,9 @@ jobs:
   sync-all:
     name: 懂火登录 → 9 模块接口取数 → 飞书写入 → 汇总通知
     runs-on: ubuntu-latest
-    # 本地实测 2026-10-03：8 模块取数 ≈238s + 8 张表写入 ≈500s；⑨ 库存 1101 行再 +15s
-    timeout-minutes: 30
+    # 2026-10-03 改造后：表级并发写 + 取写流水线，实测总时长见 run 记录（原串行版 17 分钟）
+    # 30 分钟 → 20 分钟：正常 5-6 分钟，20 足够兜住重试，也降低挂死时的计费
+    timeout-minutes: 20
 
     steps:
       - name: 检出代码
@@ -29,11 +30,11 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: 'pip'                          # 缓存 wheel，第二次起省 20-40s
+          cache-dependency-path: requirements.txt
 
       - name: 安装 Python 依赖
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+        run: pip install -r requirements.txt
 
       # 不再安装 Playwright：全 JSON 接口取数，零浏览器
       # （登录验证码仍走 ddddocr，已含在 requirements.txt 里）
@@ -62,7 +63,8 @@ jobs:
 
           # 时区：① 出库筛选的 end_time 取「今天」，UTC runner 不设会差一天
           TZ: "Asia/Shanghai"
-        run: python 数据汇总/Update_Data.py
+        # --workers 6：表级并发写（表内仍严格串行）。回滚用 --workers 1 --no-pipeline
+        run: python 数据汇总/Update_Data.py --workers 6
 
       # 失败时把已拉到的原始数据留成证据（runner 结束后就没了）
       - name: 失败时保留 CSV 证据
