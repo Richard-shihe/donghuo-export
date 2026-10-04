@@ -900,11 +900,11 @@ def build_summary_card(results: dict, elapsed_s: float) -> dict:
     total = len(results)
     ok_cnt = sum(1 for r in results.values() if r.get("ok"))
     if ok_cnt == total:
-        template, emoji, title = "green", "✅", f"懂火数据汇总同步完成（{ok_cnt}/{total} 部分）"
+        template, emoji, title = "green", "✅", f"懂火数据汇总同步完成（{ok_cnt}/{total} 全部成功）"
     elif ok_cnt == 0:
         template, emoji, title = "red", "❌", f"懂火数据汇总同步全部失败（0/{total}）"
     else:
-        template, emoji, title = "orange", "⚠️", f"懂火数据汇总同步部分完成（{ok_cnt}/{total} 部分）"
+        template, emoji, title = "orange", "⚠️", f"懂火数据汇总同步部分完成（{ok_cnt}/{total} 成功）"
 
     elements = [
         {"tag": "div", "fields": [
@@ -933,7 +933,7 @@ def build_summary_card(results: dict, elapsed_s: float) -> dict:
     elements.append({"tag": "hr"})
     elements.append({"tag": "note", "elements": [{
         "tag": "plain_text",
-        "content": f"飞书多维表「数据汇总（2026）」 ｜ 一次登录 · {total} 部分合并同步 ｜ {now}"
+        "content": f"飞书多维表「数据汇总（2026）」 ｜ 一次登录 · {total} 个模块合并同步 ｜ {now}"
     }]})
     return {"config": {"wide_screen_mode": True},
             "header": {"template": template,
