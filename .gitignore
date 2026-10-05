@@ -85,3 +85,17 @@ desktop.ini
 # --- 数据汇总（本地项目）：运行产物不入库 ---
 /数据汇总/downloads/
 /数据汇总/csv_backup/
+
+# --- 建表/改字段脚本的运行报告（跑完打印在终端，落盘只是顺手）---
+# 2026-10-06 补：add_columns_result.txt / fix_formatter_result.txt /
+# fix_old_formatter_dryrun.txt 等 5 个文件一直散在工作区，
+# git add . 会一并扫进**公开仓库**。它们只是「字段名+formatter」的回执，
+# 不含密钥，但没有版本价值，统一按命名约定挡掉。
+*_result.txt
+*_dryrun.txt
+
+# --- Windows 复制文件产生的「- 副本」命名（2026-10-06 补）---
+# Certification/stage1_certs_download - 副本.py 与已跟踪主文件逐字节相同
+# （md5 180330f232014c69f457f8268f6d0d49，33480 字节），纯垃圾。
+# 仓库里已有 stage1_certs_download_9.25_1.py 这种日期版副本先例，不再增加。
+* - 副本.*

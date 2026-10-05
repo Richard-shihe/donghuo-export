@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-懂火 9 合 1 数据汇总同步工作流（纯 JSON 接口 · 零浏览器 · 一张汇总通知卡）
+懂火 11 合 1 数据汇总同步工作流（纯 JSON 接口 · 零浏览器 · 一张汇总通知卡）
 
-一次运行、一次登录，把 9 个模块全量取回并写入飞书多维表「数据汇总（2026）」：
+一次运行、一次登录，把 11 个模块全量取回并写入飞书多维表「数据汇总（2026）」：
 
   ① 出库记录  xiaoshou/m_xiaoshou/xjilulist  → 出库数据            全量替换
   ② 销售明细  xiaoshou/m_dindan/mxlist       → 订单明细            全量替换（动态字段探测）
@@ -14,6 +14,8 @@
   ⑦ 采购订单  caigou/m_dindan/getlist        → 采购订单（自动建表）  全量替换
   ⑧ 采购明细  caigou/m_dindan/mxlist         → 采购明细（自动建表）  全量替换
   ⑨ 库存管理  xiaoshou/m_kucun/gl_kucun      → 库存（自动建表）      全量替换
+  ⑩ 费用管理  caiwu/m_feiyon/getlist         → 费用管理（自动建表）  全量替换
+  ⑪ 服务商    m_load/list_fuwu               → 服务商（自动建表）    全量替换（下拉型接口）
 
 汇总卡片里每行都带该模块自己的「用时（取数 ／ 写入）」。
 
@@ -30,7 +32,9 @@ Playwright / ddddocr / 点导出按钮 / 下载目录 / 解析伪 xls。2026-10-
   注释→备注(②)、订单 号→订单号(②)
 因此本脚本：接口里是什么键、什么值，就照抄进同名字段。
   · 表里有列、接口没这个键 → 该列留空（例：② 的「合同号」，接口不返回）
-  · 接口有键、表里没这个列 → 记日志跳过（例：① 的「锌层/涂料/结构/颜色」等）
+  · 接口有键、表里没这个列 → 记日志跳过（2026-10-05 已把 ①③④⑤⑥ 缺的 27 列补齐，
+    见 数据汇总/add_missing_columns.py；现在基本不该再出现这一类）
+  · 接口有键、但有意不同步 → 写进 EXCLUDED_API_KEYS（目前只有 ① 的「捆包号N」）
   · 公式 / 查找 / 人员 / 自动类型 → 飞书不许 API 写，自动跳过
 
 【分页安全闸】
@@ -38,11 +42,11 @@ Playwright / ddddocr / 点导出按钮 / 下载目录 / 解析伪 xls。2026-10-
 rtotal 时该模块直接判失败——全量替换是先删后建，拿残缺数据去写比写失败糟糕得多。
 
 【失败隔离】
-9 个模块各自独立 try，互不阻断；⑤ 客户是增量模式，只标记删除不真删。
+11 个模块各自独立 try，互不阻断；⑤ 客户是增量模式，只标记删除不真删。
 
 【并发（2026-10-03 提速改造）】
 飞书**同一张表不支持并发写**（并发写报 1254291 Write conflict），但**跨表可以并发**。
-所以并发粒度是「表」：9 张表各占一个线程、表内严格串行。配套三条：
+所以并发粒度是「表」：11 张表各占一个线程、表内严格串行。配套三条：
   · 进池前断言本次要写的 table_id 互不相同（防未来有人让两个模块指向同一张表）；
   · results 只在主线程写，worker 只返回结构化结果、绝不把异常抛给 future；
   · 飞书 POST 一律不挂自动重试（batch_create 若「成功但响应超时」，重试会重复写入）。
@@ -50,10 +54,27 @@ rtotal 时该模块直接判失败——全量替换是先删后建，拿残缺�
 ⚠️ 流水线模式下「取数一个、写一个」，所以取数中途整体崩掉时，先取完的模块可能已经写完。
    这不是新语义——各模块本来就是独立 try、失败的模块不写成功的照写，只是时序更早。
 
+【2026-10-06 效率审查：实测基线 + 已排除的路】
+现在的瓶颈是「懂火取数」，且它是**全局串行、压不动**的：11 模块 167 页，
+服务端自己就要 ~2s/页。飞书写入是表级并发的，基本被取数窗口盖住 —— 优化写入
+的平均速度对总时长几乎无收益，真正的关键路径是「最后取完的那张表的写入」。
+以下几条都**真跑过量过**，别再试：
+  · PAGE_SIZE 300→500  ❌ 服务端硬上限就是 300：传 400/500/600/1000 一律只回 300 条；
+                          limit=500 翻页会静默丢页（7800/12854 且 366 组订单号重复）。
+  · 懂火取数并发        ❌ 两个**独立登录**的 session 并发发请求，墙钟 3.92s > 顺序 2.57s
+                          —— 服务端全局串行，不是 PHP session 锁，多账号也绕不过。
+  · 飞书 search 替代 list ❌ page_token 不推进（加 sort 也一样），无法翻页。
+  · 只取 record_id 加速删前扫描（list 的 field_names 参数确实生效，每行只回 1 字段）
+                        ⚠️ 但读 ① 全表只从 76.4s → 67.0s：慢在**服务端分页开销**
+                           （26 页 × 2.6s），不是数据量。
+  · 启动阶段            ❌ 登录 1.0s + token 0.1s + 解析 11 个 table_id 2.0s = 3.1s。
+⚠️ 懂火服务端波动极大（同一接口同样参数，实测 ① 140.8s / 268s，⑧ 29.1s / 76s，
+   两轮差 1.9~2.6 倍）。**别拿单次运行的数据调参**，也别按单次结果判断优化有没有用。
+
 使用：
   python Update_Data.py [--dry-run] [--no-notify] [--only a,b,...] [--workers N] [--no-pipeline]
   python Update_Data.py --check-fields [--markdown]     # 只读：字段对照表 / 安全闸
-  python Update_Data.py --ensure-tables [--dry-run]     # 幂等建 ⑦⑧⑨ 三张新表
+  python Update_Data.py --ensure-tables [--dry-run]     # 幂等建 ⑦⑧⑨⑩⑪ 五张新表
 回滚：--workers 1 --no-pipeline 等价于改造前的串行行为。
 
 凭据：仓库根目录 .env 里的 DH_USERNAME / DH_PASSWORD + FEISHU_APP_ID / FEISHU_APP_SECRET
@@ -85,11 +106,16 @@ FEISHU_NOTIFY_UNION_ID = "on_b09bcbf3e74f5d423900aa9b2f00eb63"   # 洪
 
 EXPORT_START_DATE = "2026-01-01"   # ① 出库筛选起始日期
 PAGE_SIZE  = 300    # 懂火 getlist 单页上限就是 300（实测），写 500 会静默丢页
+# 翻页之间歇多久。2026-10-06 从 0.3 调到 0.1 —— 实测 11 模块共 167 页，
+# 每页服务端就要 ~1.8s，请求本身严格串行（上一页响应回来才发下一页），
+# 这个 sleep 防的是「并发轰炸」，而这条链上根本没有并发。0.3s × 156 次
+# = 46.8s 纯等待，占取数总时长 13.7%。调低是省关键路径上最便宜的一笔。
+PAGE_SLEEP = 0.1
 MAX_PAGES  = 50     # 分页保险丝：翻满仍凑不齐 rtotal → 该模块判失败
 BATCH_SIZE = 500    # 飞书 bitable batch_* 单次上限
 CSV_DIR = Path(__file__).parent / "csv_backup"
 CSV_DIR.mkdir(exist_ok=True)
-MD_PATH = Path(__file__).parent / "九合一字段对照表.md"
+MD_PATH = Path(__file__).parent / "十一合一字段对照表.md"
 
 
 # ===== 字段映射（飞书字段名 == 懂火接口键名，全部同名直连）=====
@@ -100,41 +126,97 @@ FIELD_TYPE_CODE_MAP = {   # 飞书字段类型码 → 写入策略；其余（Us
 }
 _STRATEGY_TO_CREATE_CODE = {"text": 1, "number": 2, "datetime": 5}   # --ensure-tables 建表用
 
-# ① 出库记录（32 列；接口 50 键，另有锌层/涂料/结构/颜色/销售费用/最低价/合计成本/
-#    采购单号/目的港/米数/新增时间 等 18 个键表里没有对应列，跳过）
+# DateTime 字段建表时要带的 property（与 ①~⑨ 现有日期列逐字一致）
+# 不带的话飞书给默认格式（含时分秒），跟其它表长得不一样
+_DATE_PROP = {"auto_fill": False, "date_formatter": "yyyy/MM/dd"}
+
+
+def _number_formatter(name: str) -> str:
+    """Number 字段建表时要用的显示精度。
+
+    注意：建表时不显式给 property.formatter，飞书默认给 "0.0"（只显示 1 位小数），
+    会在**屏幕上**把懂火的小数四舍五入掉：2.190 显示成 2.2、0.370 显示成 0.4、
+    4.136 显示成 4.1。存储值是对的，坏的是显示 —— 用户逐行看每一件货都不对、合计也不对。
+    2026-10-04 用户报「库存每一件货的重量都不对、总重也不对」就是这个原因：
+    ⑦⑧⑨ 是 --ensure-tables 建的，29 个 Number 字段全部中招（已用
+    数据汇总/fix_number_formatter.py 改回，建表源头在这里堵上）。
+
+    口径与 ①~⑥ 人工建的表一致：重量 3 位、金额/单价/税率 2 位、件数/库龄 0 位。
+    """
+    if "重量" in name:
+        return "0.000"
+    if name.endswith("数") or name == "库龄":   # 件(张)数 / 可售件数 / 库龄
+        return "0"
+    return "0.00"
+
+# ① 出库记录（接口 50 键，丢掉 id 和 4 个主动排除键后 45 列，与接口键序一致）
+#   2026-10-05 补齐了此前表里缺的 17 列（状态/销售日期/入库日期/锌层/涂料/结构/颜色/
+#   最低价/锁定发票/销售其它/销售费用/合计成本/采购单号/米数/目的港/捆包号N/新增时间）。
+#   ⚠️ 「米数」是文本不是数字：实测 4955 行非空，值全是交期/仓库/往来方简称这类备注
+#      （形如「挂-××」「XXX-×.××」「×.××离港」），不是量 —— ERP 那个列名是历史包袱，
+#      装的根本不是数字（⑨库存同样是文本）。真实值不入库，避免把往来方写进公开仓库。
 CHUKU_FIELD_TYPES = {
-    "所属公司": "text", "出库日期": "datetime", "销售人": "text", "客户名称": "text",
-    "订单号": "text", "品名": "text", "规格": "text", "材质": "text", "产地": "text",
-    "等级": "text", "件(张)数": "number", "采购重量": "number", "重量(吨)": "number",
-    "挂牌价": "number", "销售单价": "number", "销售税率": "number", "销售金额": "number",
-    "未开发票": "number", "供应商": "text", "采购单价": "number", "采购税率": "number",
-    "采购金额": "number", "费用金额": "number", "利润": "number", "市场盈利": "number",
-    "仓库": "text", "库位号": "text", "捆包号": "text", "合同号": "text", "车船号": "text",
-    "提单号": "text", "备注": "text",
+    "订单号": "text", "所属公司": "text", "客户名称": "text",
+    "出库日期": "datetime", "销售日期": "datetime", "入库日期": "datetime",
+    "品名": "text", "规格": "text", "产地": "text", "等级": "text", "材质": "text",
+    "锌层": "text", "涂料": "text", "结构": "text", "颜色": "text", "备注": "text",
+    "件(张)数": "number", "重量(吨)": "number",
+    "销售人": "text", "销售税率": "number", "销售单价": "number",
+    "挂牌价": "number", "销售金额": "number", "锁定发票": "number", "未开发票": "number",
+    "销售费用": "number",
+    "采购重量": "number", "采购单价": "number", "采购税率": "number", "采购金额": "number",
+    "合计成本": "number", "费用金额": "number", "利润": "number", "市场盈利": "number",
+    "供应商": "text", "采购单号": "text", "合同号": "text", "提单号": "text",
+    "米数": "text", "目的港": "text", "仓库": "text", "车船号": "text", "库位号": "text",
+    "捆包号": "text", "新增时间": "datetime",
 }
 
-# ③ 应收汇总（客户级汇总，非订单级）
+# 主动不写的接口键 —— 既不入表，也不当成「漏列」报警。
+#
+#   ①「捆包号N」：96 位十六进制哈希（实测 12846 条 96 位、7 条 64 位、1 条 128 位）。
+#     同一行隔一次请求取回来，前 32 位相同、后面全变 —— 是 ERP 给页面用的即时签名，
+#     不是业务数据。真业务值是它左边那列「捆包号」（字母数字混排、约 13~15 位的批号串）。
+#
+#   ①「状态」「最低价」「销售其它」+ ③「期初应收」「期初应开发票」：2026-10-05 补列后
+#     实测**没有任何信息量**，用户拍板不要（其余 16 列照补）。逐列实测值：
+#       · ①状态     12854 行**全部**是「已出库」，不同值只有 1 个
+#       · ①最低价   12854 行**全部**是 0.00，不同值只有 1 个
+#       · ①销售其它 12850 行是 0.00，只有 4 行有真值
+#       · ③期初应收 / ③期初应开发票  各 577 行**全部**是 0.00，不同值只有 1 个
+#
+#   ⚠️ 全量替换是先删后建，所以飞书表里这几列会变成全空（列本身保留，要删得去飞书手动删）。
+EXCLUDED_API_KEYS = {
+    "chuku": ["捆包号N", "状态", "最低价", "销售其它"],
+    "yingshou": ["期初应收", "期初应开发票"],
+}
+
+# ③ 应收汇总（客户级汇总，非订单级；接口 10 键，丢掉 id 和 2 个排除键后 7 列）
 # 表里另有「参与」= Lookup(客户表→参与人)：飞书 API 不许新建/修改 Lookup，脚本不碰
+# 2026-10-05 补了「期初应收」「期初应开发票」两列，实测全是 0.00 → 同日用户拍板摘掉
 YINGSHOU_FIELD_TYPES = {
     "客户名称": "text", "所属公司": "text", "销售人": "text",
     "应收款": "number", "实收款": "number", "可结算": "number", "未收款": "number",
 }
 
-# ④ 往来流水（接口 18 键，其中 id/提交日期/米数 表里无列）
+# ④ 往来流水（接口 18 键，丢掉 id 后 17 列）
+# 2026-10-05 补了「提交日期」「米数」两列（米数 9146 行全空，按 ①⑨ 口径定文本）
 WANGLAI_FIELD_TYPES = {
-    "所属公司": "text", "日期": "datetime", "我方帐户": "text", "交易对方": "text",
-    "交易类型": "text", "科目名称": "text", "结算方式": "text", "金额": "number",
-    "状态": "text", "结算对方": "text", "订单号": "text", "销售人": "text",
+    "所属公司": "text", "日期": "datetime", "提交日期": "datetime",
+    "我方帐户": "text", "交易对方": "text", "交易类型": "text", "科目名称": "text",
+    "结算方式": "text", "金额": "number", "状态": "text", "结算对方": "text",
+    "订单号": "text", "销售人": "text", "米数": "text",
     "备注说明": "text", "提交人": "text", "确认人": "text",
 }
 
-# ⑥ 销售订单（17 列；表里另有提成项目自建的「利润」「市场利润」，接口无来源 → 每次同步会清空，
-#    见 README 已知风险）
+# ⑥ 销售订单（接口 21 键，丢掉 id 后 20 列；表里另有提成项目自建的「利润」「市场利润」，
+#    接口无来源 → 每次同步会清空，见 README 已知风险）
+# 2026-10-05 补了「销售日期」「发货状态」「应结金额」三列
 XSDD_FIELD_TYPES = {
-    "订单号": "text", "所属公司": "text", "日期": "datetime", "销售状态": "text",
-    "销售人": "text", "客户名称": "text", "订单重量": "number", "订单金额": "number",
-    "实发重量": "number", "实发金额": "number", "销售费用": "number", "其它款项": "number",
-    "合同定金": "number", "已结金额": "number", "未结金额": "number", "合同未结": "number",
+    "订单号": "text", "所属公司": "text", "日期": "datetime", "销售日期": "datetime",
+    "销售状态": "text", "发货状态": "text", "销售人": "text", "客户名称": "text",
+    "订单重量": "number", "订单金额": "number", "实发重量": "number", "实发金额": "number",
+    "销售费用": "number", "其它款项": "number", "合同定金": "number", "应结金额": "number",
+    "已结金额": "number", "未结金额": "number", "合同未结": "number",
     "新增时间": "datetime",
 }
 
@@ -177,22 +259,49 @@ KUCUN_FIELD_TYPES = {
     "库龄": "number", "备注": "text", "新增时间": "datetime",
 }
 
+# ⑩ 费用管理（新表，--ensure-tables 自动建；接口 24 键）
+# ⚠️ start_time 与 end_time 必须**成对**传：只传 start_time 等于没传（仍返回全量 11162 行），
+#    两个都传才生效 → 3068 行（2026-01-01 起）。实测 11 页 / 11 秒。
+# 「米数」在接口里有、页面上根本不显示，实测 3068 行全空；按 ①⑨ 口径定文本。
+# 「发票号」必须是文本：值是 19~20 位数字串，甚至有一行是两个号用「，」连写，数字类型会被浮点截精度。
+FEIYONG_FIELD_TYPES = {
+    "id": "text", "订单号": "text", "编号": "text", "米数": "text",
+    "所属公司": "text", "服务商名称": "text", "销售人": "text", "科目名称": "text",
+    "计价方式": "text", "税率": "number", "费用单价": "number", "费用金额": "number",
+    "计价重量": "number", "计算金额": "number", "日期": "datetime", "备注说明": "text",
+    "费用类型": "text", "审核状态": "text", "付款状态": "text", "付款日期": "datetime",
+    "发票状态": "text", "发票日期": "datetime", "发票号": "text", "结算人": "text",
+}
+
+# ⑪ 服务商（新表，--ensure-tables 自动建）
+# 来源不是 getlist，而是「设置 → 服务商」页面的下拉数据源 m_load/list_fuwu：
+# 一次性返回裸数组 [{"key": 名称, "value": 名称}]，无分页、无 rtotal（走 list_api 分支）。
+# 实测 271 条，key==value 全同、无空值、无重复、无前后空格。
+# ⚠️ 完整页面 system/v_fuwu 上还有 地址/电话/备注 三列，但其接口 system/m_fuwu/getlist
+#    对当前脚本所用的懂火账号（见 .env 的 DH_USERNAME）返回「没有权限」；
+#    用户 2026-10-05 决定就用下拉这份。
+FUWUSHANG_FIELD_TYPES = {"服务商名称": "text"}
+
 # ⑤ 客户：主键=客户名称；跟踪字段；仅新增写创建时间；已删除标记
+# 「所属公司」2026-10-05 加入跟踪字段（走 kehu_diff 的文本比对）
+# 时间类字段单列：值要转毫秒时间戳，不能当文本比，也参与增量比对（首轮会把空列补齐）
 KEHU_TRACKED_FIELDS = [
     "客户类型", "所属人", "联系人", "联系人职位", "固定电话", "移动电话",
-    "邮箱地址", "所属省份", "联系地址", "主营产品", "采购产品", "备注",
+    "邮箱地址", "所属省份", "联系地址", "主营产品", "采购产品", "备注", "所属公司",
 ]
+KEHU_TIME_FIELDS = ["新增时间", "最后更新"]
 DELETED_MARK = "已删除"
 _JUNK_RE = re.compile(r"^\d{1,2}$")   # '1'/'0'/'00' 等占位垃圾值
 
 
-# ===== 九合一注册表（加模块只改这一处）=====
+# ===== 十一合一注册表（加模块只改这一处）=====
 # api     : /model/admin/ 之后的路径
 # page    : 该表在懂火后台的页面地址，用作 Referer（懂火要求带）
 # params  : 必须显式传的筛选参数——少一个就返回子集或非 JSON（实测）
 # table   : 飞书表 id；写 ensure 的表示按表名自动定位/建表
 # dynamic : 写入时实时探测飞书字段类型（② 订单明细用；其余用上面的硬编码映射）
-PART_ORDER = ["chuku", "dingdan", "yingshou", "wanglai", "kehu", "xsdd", "cgdd", "cgmx", "kucun"]
+PART_ORDER = ["chuku", "dingdan", "yingshou", "wanglai", "kehu", "xsdd", "cgdd", "cgmx", "kucun",
+              "feiyong", "fuwushang"]
 
 
 def _today() -> str:
@@ -221,7 +330,14 @@ PARTS = {
     "wanglai": {
         "name": "④ 往来流水", "table": "tblbS1dPaDVL3GY8",
         "api": "caiwu/m_liushui/getlist", "page": "caiwu/v_x_jiesuan",
-        "params": lambda: {}, "fields": WANGLAI_FIELD_TYPES,
+        # 2026-10-06 加时间过滤，与 ① 出库同口径（用户拍板）。
+        # 不加时是全量历史 9146 行（含 2000/2022/2023/2024/2025 共 6547 行），
+        # 加 start_time=2026-01-01 后 2599 行 —— 实测逐条核对「日期」字段
+        # 100% 落在 2026 年，无泄漏。取数 74s→39s，且 ④ 正是全流程关键路径上
+        # 最长的那条尾巴（取完 267s + 写入 131s = 398s，比取数总时长还长）。
+        # ⚠️ 全量替换是先删后建：改这里等于把 2026 年以前的往来流水从飞书表里清掉。
+        "params": lambda: {"start_time": EXPORT_START_DATE, "end_time": _today()},
+        "fields": WANGLAI_FIELD_TYPES,
     },
     "kehu": {
         "name": "⑤ 客户管理", "table": "tblCE7zIWs804RR5",
@@ -251,6 +367,20 @@ PARTS = {
         "api": "xiaoshou/m_kucun/gl_kucun", "page": "xiaoshou/v_kucun_gl",
         "params": lambda: {"sxzhuantai": ""}, "fields": KUCUN_FIELD_TYPES,
     },
+    "feiyong": {
+        "name": "⑩ 费用管理", "table": None, "ensure": "费用管理",
+        # ⚠️ start_time 必须与 end_time 成对传，只传一个会被忽略（仍返回全量 11162 行）
+        "api": "caiwu/m_feiyon/getlist", "page": "caiwu/v_feiyon",
+        "params": lambda: {"start_time": EXPORT_START_DATE, "end_time": _today()},
+        "fields": FEIYONG_FIELD_TYPES,
+    },
+    "fuwushang": {
+        "name": "⑪ 服务商", "table": None, "ensure": "服务商",
+        # 下拉型接口：返回裸数组 [{"key","value"}]，不是 {root, rtotal} 分页形状 → list_api 分支
+        "api": "m_load/list_fuwu", "page": "system/v_fuwu",
+        "params": lambda: {}, "list_api": True, "list_key": "服务商名称",
+        "fields": FUWUSHANG_FIELD_TYPES,
+    },
 }
 
 PART_NAMES = {k: v["name"] for k, v in PARTS.items()}
@@ -259,7 +389,8 @@ _ENSURED = {}   # 运行时按表名解析出来的 table_id 缓存：{part: tab
 
 # 取数顺序 = 写入量降序。流水线模式下每张表「取数一结束就开始写」，
 # 让行数最大的 ① 最早开工，整条链最短（卡片与 results 顺序仍用 PART_ORDER）。
-FETCH_ORDER = ["chuku", "dingdan", "wanglai", "cgmx", "cgdd", "xsdd", "kucun", "yingshou", "kehu"]
+FETCH_ORDER = ["chuku", "dingdan", "wanglai", "cgmx", "feiyong", "cgdd", "xsdd", "kucun",
+               "yingshou", "kehu", "fuwushang"]
 assert set(FETCH_ORDER) == set(PART_ORDER), "FETCH_ORDER 与 PART_ORDER 不一致（加模块时漏了？）"
 
 DEFAULT_WORKERS = 6   # 并发写表的线程数；① 出库（≈162s）是硬下界，4 个已到底，6 是到达不齐的余量
@@ -346,6 +477,31 @@ def _getlist_headers(part: str) -> dict:
             "Referer": f"{DONGHUO_BASE}/view/admin/{PARTS[part]['page']}"}
 
 
+def _fetch_list_api(session, part: str) -> list:
+    """下拉型接口（⑪ 服务商 /m_load/list_fuwu）：一次性返回裸数组，无分页。
+
+    形状是 [{"key": 名称, "value": 名称}]，不是 getlist 的 {root, rtotal}，
+    所以不能走 fetch_all 的翻页逻辑。取 value 落成 [{飞书列名: 值}]，
+    之后跟其它模块共用同一条「CSV → 预检 → 清空 → 批量写」链路。
+    """
+    spec, name = PARTS[part], PARTS[part]["name"]
+    col = spec["list_key"]
+    r = session.post(_getlist_url(part), data={}, headers=_getlist_headers(part), timeout=60)
+    try:
+        data = r.json()
+    except ValueError:
+        raise RuntimeError(f"{name}：返回非 JSON（登录态可能失效）: {r.text[:150]}")
+    if not isinstance(data, list):
+        raise RuntimeError(f"{name}：期望裸数组，实际 {type(data).__name__}: {str(data)[:150]}")
+    rows = []
+    for it in data:
+        v = norm_text((it or {}).get("value") if isinstance(it, dict) else it)
+        if v:
+            rows.append({col: v})
+    log(f"[{name}] ✅ 拉取完成，共 {len(rows)} 条（原始 {len(data)} 条，空值已丢 {len(data) - len(rows)} 条）")
+    return rows
+
+
 def fetch_all(session, part: str) -> list:
     """按模块从懂火 getlist 接口顺序翻页拉全量（后台页面表格用的就是这些接口）。
 
@@ -354,6 +510,8 @@ def fetch_all(session, part: str) -> list:
        拿残缺数据去写，比直接失败糟糕得多。
     """
     spec, name = PARTS[part], PARTS[part]["name"]
+    if spec.get("list_api"):
+        return _fetch_list_api(session, part)
     max_pages = spec.get("max_pages", MAX_PAGES)
     params = spec["params"]()
     all_rows, rtotal = [], None
@@ -373,7 +531,7 @@ def fetch_all(session, part: str) -> list:
             log(f"[{name}] 第 {page_no} 页: 累计 {len(all_rows)}/{rtotal}")
         if not root or (rtotal and len(all_rows) >= rtotal):
             break
-        time.sleep(0.3)
+        time.sleep(PAGE_SLEEP)
     if rtotal is not None and len(all_rows) < rtotal:
         raise RuntimeError(f"{name}：只拉到 {len(all_rows)}/{rtotal} 条（翻满上限 {max_pages} 页）"
                            f"—— 全量替换先删后建，拒绝写入残缺数据")
@@ -393,7 +551,11 @@ def fetch_all(session, part: str) -> list:
 
 def probe_json_keys(session, part: str) -> list:
     """只拉第 1 页，取接口返回的键名（供 --check-fields 用，不落盘）"""
-    r = session.post(_getlist_url(part), data={"page": 1, "limit": PAGE_SIZE, **PARTS[part]["params"]()},
+    spec = PARTS[part]
+    if spec.get("list_api"):
+        # 下拉型接口没有行键，只有 key/value 两个字段；入表的是 list_key 那一列
+        return [spec["list_key"]]
+    r = session.post(_getlist_url(part), data={"page": 1, "limit": PAGE_SIZE, **spec["params"]()},
                      headers=_getlist_headers(part), timeout=60)
     root = (r.json().get("root") or [])
     return list(root[0].keys()) if root else []
@@ -606,7 +768,7 @@ def convert_value(raw, ftype: str):
     return None
 
 
-def rows_to_records(rows: list, field_types: dict, tag: str = "") -> list:
+def rows_to_records(rows: list, field_types: dict, tag: str = "", exclude=()) -> list:
     """懂火接口 dict 列表 → 飞书 batch_create 记录列表。
 
     外层迭代「飞书字段名」，直接取同名接口键——无别名、无推导。
@@ -623,9 +785,12 @@ def rows_to_records(rows: list, field_types: dict, tag: str = "") -> list:
     missing = [c for c in writable if c not in json_keys]
     if missing:
         log(f"[{tag}] ⚠️ 表里有列但接口无此键，该列将留空: {', '.join(missing)}")
-    unused = sorted(json_keys - set(writable) - {"id"})
+    unused = sorted(json_keys - set(writable) - {"id"} - set(exclude))
     if unused:
         log(f"[{tag}] 接口有键但表里没列，不入表: {', '.join(unused)}")
+    hit = sorted(json_keys & set(exclude))
+    if hit:
+        log(f"[{tag}] 🚫 主动排除，不入表: {', '.join(hit)}")
 
     records = []
     for row in rows:
@@ -681,6 +846,10 @@ def kehu_build_new_fields(row: dict) -> dict:
     ts = to_datetime_ms(row.get("新增时间"))
     if ts:
         fields["创建时间"] = ts
+    for col in KEHU_TIME_FIELDS:
+        ms = to_datetime_ms(row.get(col))
+        if ms:
+            fields[col] = ms
     return fields
 
 
@@ -692,6 +861,11 @@ def kehu_diff(row: dict, feishu_fields: dict) -> dict:
         old_v = norm_text(feishu_fields.get(col))
         if is_meaningful(new_v) and new_v != old_v:
             changed[col] = new_v
+    # 时间类：飞书存的是毫秒时间戳，得跟毫秒比（别拿字符串去比，会永远判不等）
+    for col in KEHU_TIME_FIELDS:
+        ms = to_datetime_ms(row.get(col))
+        if ms and ms != feishu_fields.get(col):
+            changed[col] = ms
     return changed
 
 
@@ -744,7 +918,7 @@ def kehu_plan(donghuo_rows: list, feishu_records: list) -> dict:
 # ============ 各部分飞书写入（返回 stats dict；失败 raise）============
 
 def run_full_replace(token: str, part: str, payload: dict) -> dict:
-    """全量替换：预检 → 清空 → 写入（①②③④⑥⑦⑧⑨ 共用；② 走动态字段探测）
+    """全量替换：预检 → 清空 → 写入（①②③④⑥⑦⑧⑨⑩⑪ 共用；② 走动态字段探测）
 
     顺序刻意是「先预检、后清空」：字段映射若有问题，5 条预检就会失败并抛出，
     此时表里原数据一条没动；而不是删光了才发现写不进去（那才是真正的灾难）。
@@ -759,7 +933,8 @@ def run_full_replace(token: str, part: str, payload: dict) -> dict:
     else:
         field_types = spec["fields"]
 
-    records = rows_to_records(payload["rows"], field_types, name)
+    records = rows_to_records(payload["rows"], field_types, name,
+                              exclude=EXCLUDED_API_KEYS.get(part, []))
     if not records:
         raise RuntimeError(f"{name}：待写入记录 0 条，拒绝清空现有数据")
 
@@ -895,7 +1070,7 @@ def _part_line_md(key: str, res: dict) -> str:
 
 
 def build_summary_card(results: dict, elapsed_s: float) -> dict:
-    """九合一汇总卡片：全成功绿 / 部分失败橙 / 全失败红"""
+    """十一合一汇总卡片：全成功绿 / 部分失败橙 / 全失败红"""
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     total = len(results)
     ok_cnt = sum(1 for r in results.values() if r.get("ok"))
@@ -978,7 +1153,7 @@ def table_id_of(part: str) -> str:
 
 
 def ensure_tables(token: str, dry_run: bool = False) -> dict:
-    """按表名幂等引导 ⑦⑧⑨ 三张新表：已有就用，没有就一次建表带全部字段。
+    """按表名幂等引导 ⑦⑧⑨⑩⑪ 五张新表：已有就用，没有就一次建表带全部字段。
     字段名 1:1 照抄懂火接口，不做任何翻译；首字段即主字段，必须是文本。"""
     existing = {t["name"]: t["table_id"] for t in bitable_list_tables(token)}
     resolved = {}
@@ -991,8 +1166,16 @@ def ensure_tables(token: str, dry_run: bool = False) -> dict:
             resolved[part] = existing[want]
             log(f"[建表] {spec['name']}: 已存在「{want}」 → {existing[want]}（跳过）")
             continue
-        fields = [{"field_name": f, "type": _STRATEGY_TO_CREATE_CODE[t]}
-                  for f, t in spec["fields"].items()]
+        fields = []
+        for f, t in spec["fields"].items():
+            fd = {"field_name": f, "type": _STRATEGY_TO_CREATE_CODE[t]}
+            if t == "number":
+                # 必须显式给 formatter，否则飞书默认 "0.0" 把重量/金额的显示砍到 1 位小数
+                fd["property"] = {"formatter": _number_formatter(f)}
+            elif t == "datetime":
+                # 同上：不带 date_formatter 会跟 ①~⑨ 的日期列长得不一样
+                fd["property"] = dict(_DATE_PROP)
+            fields.append(fd)
         log(f"[建表] {spec['name']}: 新建「{want}」，{len(fields)} 个字段 ...")
         if dry_run:
             for i, f in enumerate(fields, 1):
@@ -1018,7 +1201,7 @@ def check_fields(session, token: str, to_markdown: bool = False) -> int:
     """只读：逐模块核对「飞书列 ↔ 接口键 ↔ 脚本映射」，输出告警 + 对照表。
     返回发现的问题数（0 = 干净）。"""
     problems = 0
-    md = ["# 九合一字段对照表", "",
+    md = ["# 十一合一字段对照表", "",
           f"生成时间：{datetime.datetime.now():%Y-%m-%d %H:%M:%S}", "",
           "> 由 `python 数据汇总/Update_Data.py --check-fields --markdown` 生成。",
           "> 约定：**飞书列名 == 懂火接口键名**，脚本不做任何别名或强行映射；",
@@ -1048,7 +1231,8 @@ def check_fields(session, token: str, to_markdown: bool = False) -> int:
         writable = {c: t for c, t in effective.items() if t != "unsupported"}
         unsupported = [c for c, t in effective.items() if t == "unsupported"]
         no_source = [c for c in writable if c not in keys]
-        no_column = [k for k in keys if k not in effective and k != "id"]
+        excluded = set(EXCLUDED_API_KEYS.get(part, []))
+        no_column = [k for k in keys if k not in effective and k != "id" and k not in excluded]
         not_in_feishu = [c for c in effective if c not in feishu]
 
         log(f"[对照] {name}: 接口 {len(keys)} 键 / 可写映射 {len(writable)} 列 / 表里 {len(feishu)} 字段"
@@ -1059,6 +1243,8 @@ def check_fields(session, token: str, to_markdown: bool = False) -> int:
             log(f"[对照]   ⬜ 表里有列、接口无键 → 留空: {', '.join(no_source)}")
         if no_column:
             log(f"[对照]   ➖ 接口有键、表里无列 → 不入表: {', '.join(no_column)}")
+        if excluded:
+            log(f"[对照]   🚫 主动排除（有意不同步）: {', '.join(sorted(excluded))}")
         if not_in_feishu:
             log(f"[对照]   ⚠️ [WARN] 脚本映射了但飞书表里没这列: {', '.join(not_in_feishu)}")
             problems += 1
@@ -1072,6 +1258,9 @@ def check_fields(session, token: str, to_markdown: bool = False) -> int:
             md.append(f"- ⬜ **表里有列、接口无键 → 该列留空**：{', '.join(f'`{c}`' for c in no_source)}")
         if no_column:
             md.append(f"- ➖ 接口有键、表里无列 → 不入表：{', '.join(f'`{k}`' for k in no_column)}")
+        if excluded:
+            md.append(f"- 🚫 **主动排除（有意不同步）**："
+                      f"{', '.join(f'`{k}`' for k in sorted(excluded))}")
         if not_in_feishu:
             md.append(f"- ⚠️ **脚本映射了但飞书表里没这列（写不进去）**："
                       f"{', '.join(f'`{c}`' for c in not_in_feishu)}")
@@ -1117,12 +1306,22 @@ def _is_tail_part(part: str) -> bool:
 def _write_part(token: str, part: str, payload_part: dict) -> dict:
     """单个模块的飞书写入 —— 线程池任务单元，也是单模块内联执行的同一个入口。
 
+    CSV 落盘也在这里做（2026-10-06 从取数主线程挪进来）：实测 11 个模块落盘
+    合计 ~12s，而取数是严格串行的，落在主线程里就是直接挡住下一个模块。
+    挪进来之后「先落 CSV、后写飞书」的顺序一字不变，落盘失败照样不写飞书。
+
     ⚠️ 契约：自己吞掉所有异常、以结构化结果返回，绝不把异常抛给 future。
        否则 as_completed 循环里某个 future 一抛错，主线程就会跳过其余模块的结果，
        卡片显示错误、退出码也会不对。
     """
     name = PARTS[part]["name"]
     t = time.time()
+    try:
+        csv_path = rows_to_csv(payload_part["rows"], part)
+    except Exception as e:
+        return {"part": part, "ok": False, "stats": None,
+                "error": f"CSV 落盘失败（未写飞书）: {e}", "write_s": time.time() - t,
+                "tb": traceback.format_exc(limit=3), "csv": None}
     try:
         if PARTS[part].get("incremental"):
             # ⑤ 的增量写入与「补参与」后处理是不可分割的一个单元：
@@ -1136,11 +1335,11 @@ def _write_part(token: str, part: str, payload_part: dict) -> dict:
         else:
             stats = run_full_replace(token, part, payload_part)
         return {"part": part, "ok": True, "stats": stats, "error": None,
-                "write_s": time.time() - t, "tb": None}
+                "write_s": time.time() - t, "tb": None, "csv": csv_path}
     except Exception as e:
         return {"part": part, "ok": False, "stats": None,
                 "error": f"飞书写入失败: {e}", "write_s": time.time() - t,
-                "tb": traceback.format_exc(limit=3)}
+                "tb": traceback.format_exc(limit=3), "csv": csv_path}
 
 
 def _merge(results: dict, part: str, csv_path, r: dict):
@@ -1164,19 +1363,19 @@ def _merge(results: dict, part: str, csv_path, r: dict):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="懂火 9 合 1 数据汇总同步（纯 JSON 接口，零浏览器）")
+    ap = argparse.ArgumentParser(description="懂火 11 合 1 数据汇总同步（纯 JSON 接口，零浏览器）")
     ap.add_argument("--dry-run", action="store_true", help="取数 + 落 CSV + 打印计划，不写飞书")
     ap.add_argument("--no-notify", action="store_true", help="不发飞书通知")
     ap.add_argument("--only", default="", help=f"只跑部分：逗号分隔 {','.join(PART_ORDER)}")
     ap.add_argument("--check-fields", action="store_true",
                     help="只读：核对字段对照表并输出告警（需先登录懂火）")
     ap.add_argument("--markdown", action="store_true", help="配合 --check-fields，写出对照表 .md")
-    ap.add_argument("--ensure-tables", action="store_true", help="幂等建 ⑦⑧⑨ 三张新表（按表名查，缺则建）")
+    ap.add_argument("--ensure-tables", action="store_true", help="幂等建 ⑦⑧⑨⑩⑪ 五张新表（按表名查，缺则建）")
     ap.add_argument("--workers", type=int, default=DEFAULT_WORKERS,
-                    help=f"并发写表的线程数（默认 {DEFAULT_WORKERS}，上限 9）。"
+                    help=f"并发写表的线程数（默认 {DEFAULT_WORKERS}，上限 11）。"
                          f"1 = 串行写，配合 --no-pipeline 等价于改造前的行为")
     ap.add_argument("--no-pipeline", action="store_true",
-                    help="关掉取写流水线：仍然并发写表，但先把 9 个模块全部取完才开始写")
+                    help="关掉取写流水线：仍然并发写表，但先把 11 个模块全部取完才开始写")
     args = ap.parse_args()
 
     t0 = time.time()
@@ -1187,7 +1386,7 @@ def main():
 
     # ---- 只读模式：建表 / 字段对照表 ----
     if args.check_fields or args.ensure_tables:
-        log(f"==== 懂火九合一 · {'字段对照' if args.check_fields else '建表'} 模式 ====")
+        log(f"==== 懂火十一合一 · {'字段对照' if args.check_fields else '建表'} 模式 ====")
         token = feishu_token()
         if args.ensure_tables:
             ensure_tables(token, dry_run=args.dry_run)
@@ -1221,7 +1420,7 @@ def main():
         # 流水线模式下取数中途就要提交写入任务，token 必须提前拿
         log("[飞书] 获取 tenant_access_token ...")
         token = feishu_token()
-        # 单线程预解析 ⑦⑧⑨ 的 table_id（这几张要按表名现场查），
+        # 单线程预解析 ⑦⑧⑨⑩⑪ 的 table_id（这几张要按表名现场查），
         # 避免多个写表线程同时首次解析同一个模块
         log("[飞书] 解析目标表 id ...")
         for part in PART_ORDER:
@@ -1258,8 +1457,11 @@ def main():
             results[part]["fetch_s"] = time.time() - t_part   # 只计接口翻页，CSV 落盘另算
             if not rows:
                 raise RuntimeError("接口返回空")
-            # CSV 先落盘、后写飞书（顺序不变）；取数与落盘都成功才进 payload
-            payload[part] = {"rows": rows, "csv": rows_to_csv(rows, part)}
+            # dry-run 没有写入线程，CSV 只能在这里落；正式跑时由 _write_part 落
+            # （「先落 CSV、后写飞书」在那边同样成立，且不再挡取数）
+            payload[part] = {"rows": rows}
+            if args.dry_run:
+                payload[part]["csv"] = rows_to_csv(rows, part)
         except Exception as e:
             if results[part]["fetch_s"] is None:
                 results[part]["fetch_s"] = time.time() - t_part
@@ -1320,13 +1522,14 @@ def main():
             r = {"part": part, "ok": False, "stats": None,
                  "error": f"写入线程异常: {e}", "write_s": None,
                  "tb": traceback.format_exc(limit=3)}
-        _merge(results, part, payload.get(part, {}).get("csv"), r)
+        _merge(results, part, r.get("csv"), r)
     if pool is not None:
         pool.shutdown(wait=True)
 
     # 串行模式 / --only 单模块：主线程内联跑同一个 _write_part，行为与池内完全一致
     for part in pending:
-        _merge(results, part, payload[part]["csv"], _write_part(token, part, payload[part]))
+        r = _write_part(token, part, payload[part])
+        _merge(results, part, r.get("csv"), r)
 
     elapsed = time.time() - t0
     ok_cnt = sum(1 for r in results.values() if r.get("ok"))
