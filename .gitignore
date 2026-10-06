@@ -82,6 +82,19 @@ desktop.ini
 # --- 宝钢酸洗：本地数据分析（含大量数据快照/图表），不入库 ---
 /宝钢酸洗/
 
+# --- CRM / 费用管理：本地项目，不入库（2026-10-06 补，用户拍板「只推数据汇总」）---
+# 这两个目录此前**没有任何规则拦着**：纯未跟踪状态，一次 `git add .` / `-A` /
+# `commit -a` 就会首曝到公开仓库。而里面有：
+#   · CRM/remind.py:44 硬编码 union_id（+ L14/21/43/223 真人姓名 4 处）；
+#     migrate.py:4 / init_tables.py:4 的 **docstring 里**还各内嵌一份 base token
+#     —— 只挪变量行没用，得按「值的所有字面量位置」清
+#   · 费用管理/import_feiyong_to_donghuo.py:524 一个尚未公开的 union_id（注释带姓名），
+#     且 5 个脚本硬编码同一个 base token；:556/559/561/621 还把 union_id 打进日志
+# 要推它们，必须先把这些改成纯 .env 读取（脚本都已支持环境变量覆盖：
+# 费用管理的 FEIYONG_NOTIFY_UNION_IDS、CRM 的 --report-to）。
+/CRM/
+/费用管理/
+
 # --- 数据汇总（本地项目）：运行产物不入库 ---
 /数据汇总/downloads/
 /数据汇总/csv_backup/
