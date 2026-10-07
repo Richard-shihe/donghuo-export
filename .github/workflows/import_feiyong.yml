@@ -1,0 +1,87 @@
+name: "费用录入（飞书多维表格 → 懂火费用管理）"
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "运行模式"
+        type: choice
+        options:
+          - dry-run
+          - real
+        default: dry-run
+      limit:
+        description: "最多处理几行（稳定性优先，默认 50）"
+        required: false
+        default: "50"
+      retry_failed:
+        description: "把「写入状态=失败」的行也一起重试"
+        type: boolean
+        default: false
+      reason:
+        description: "触发说明（可选）"
+        required: false
+        default: "手动触发"
+
+# 串行化：两组提交撞在一起会在懂火里重复建单。队列跑，不取消在跑的那个。
+concurrency:
+  group: feiyong-import
+  cancel-in-progress: false
+
+jobs:
+  import-fees:
+    name: 读飞书「费用录入」→ 解析行 id → 写入懂火费用管理 → 回写状态
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: 'pip'
+          cache-dependency-path: requirements.txt
+
+      - name: 安装 Python 依赖
+        run: pip install -r requirements.txt
+
+      - name: 写入懂火费用管理
+        env:
+          # ===== 懂火系统账号（仓库 Secrets） =====
+          DH_USERNAME: ${{ secrets.DH_USERNAME }}
+          DH_PASSWORD: ${{ secrets.DH_PASSWORD }}
+
+          # ===== 飞书自建应用（仓库 Secrets，需有目标多维表格的编辑权限） =====
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+
+          # ===== 飞书群机器人（可选，失败告警卡片） =====
+          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
+          FEISHU_WEBHOOK_SECRET: ${{ secrets.FEISHU_WEBHOOK_SECRET }}
+
+          # ===== 通知收件人 union_id（逗号分隔；不配则只发群机器人） =====
+          FEIYONG_NOTIFY_UNION_IDS: ${{ secrets.FEIYONG_NOTIFY_UNION_IDS }}
+
+          TZ: "Asia/Shanghai"
+        run: |
+          # 用 || 兜底：API 触发不传 inputs 时 mode/limit 会是空串，
+          # 空 mode 若不兜底会被当成 real（真写入），这里强制回落到 dry-run / 50。
+          MODE="${{ inputs.mode || 'dry-run' }}"
+          LIMIT="${{ inputs.limit || '50' }}"
+          ARGS="--limit $LIMIT"
+          if [ "$MODE" = "dry-run" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          if [ "${{ inputs.retry_failed }}" = "true" ]; then
+            ARGS="$ARGS --retry-failed"
+          fi
+          echo "运行参数: $ARGS"
+          python 费用录入/import_feiyong_to_donghuo.py $ARGS
+
+      - name: 失败时告警
+        if: failure()
+        run: |
+          echo "::warning:: 费用录入写入懂火失败，请检查 Secrets（DH_USERNAME/DH_PASSWORD/FEISHU_APP_ID/FEISHU_APP_SECRET）或懂火网站状态"
