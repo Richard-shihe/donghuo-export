@@ -28,7 +28,7 @@
   FEISHU_APP_ID / FEISHU_APP_SECRET    飞书自建应用（需能编辑目标多维表格）
                                        —— 未配置时回退 FEISHU_NOTIFY_APP_ID / _SECRET
   DH_USERNAME / DH_PASSWORD            懂火账号
-  FEIYONG_NOTIFY_UNION_IDS             通知收件人 union_id（逗号/空格分隔；不配置则跳过私聊通知）
+  FEIYONG_NOTIFY_UNION_IDS             通知收件人 union_id（逗号/空格分隔；留空=用脚本内置的默认两人）
   FEISHU_WEBHOOK_URL / FEISHU_WEBHOOK_SECRET   飞书群机器人（可选，额外再发一份）
 """
 import os
@@ -518,14 +518,23 @@ def resolve_and_submit(session, t: dict, fuwu: set, dry_run: bool, claimed: set)
 
 # ==================== 通知卡片 ====================
 
-# 通知收件人（union_id）只从环境变量读，脚本里不内置任何真人 ID——
-# 这个仓库是公开的，硬编码 union_id 等于把同事身份首曝出去。
-# 配置位置：本地 .env、仓库 Secrets/Variables 的 FEIYONG_NOTIFY_UNION_IDS。
+# 通知收件人（union_id）：内置默认两人，可用 .env / 仓库 Secrets 的
+# FEIYONG_NOTIFY_UNION_IDS 覆盖（逗号或空格分隔）。
+# ⚠️ 2026-10-07 用户明确要求内置。本仓库是公开仓库，这两个 union_id 会随源码公开；
+#    若要收回，把下面两个值删掉、只留环境变量读取即可。
+DEFAULT_NOTIFY_UNION_IDS = [
+    "on_b09bcbf3e74f5d423900aa9b2f00eb63",   # 洪
+    "on_5b8dd7865ab1c9bc1ba8fea8668b068f",   # 陈红
+]
+
+
 def notify_recipients() -> list:
     raw = os.environ.get("FEIYONG_NOTIFY_UNION_IDS", "").strip()
-    if not raw:
-        return []
-    return [x for x in re.split(r"[,\s]+", raw) if x.strip()]
+    if raw:
+        ids = [x for x in re.split(r"[,\s]+", raw) if x.strip()]
+        if ids:
+            return ids
+    return list(DEFAULT_NOTIFY_UNION_IDS)
 
 
 def mask_uid(uid: str) -> str:
