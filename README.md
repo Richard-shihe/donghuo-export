@@ -7,7 +7,7 @@
 ## 一、项目结构
 
 ```
-A/
+donghuo-export/
 ├── donghuo_login.py          # 公共库：懂火登录（requests + ddddocr 验证码）
 ├── ibaosteel_client.py       # 公共库：宝钢 IEC 登录客户端
 ├── iecc.json                 # IEC 会话缓存（运行时生成）
