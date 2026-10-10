@@ -8,8 +8,8 @@ on:
         required: false
         default: "手动立即触发"
 
-# 并发控制：与 Update_Data_legacy.yml 共用同一个组名，
-# 保证新旧脚本绝不同时全量替换同一批飞书表（全量替换是先删后建，撞车会互相清空）。
+# 并发控制：同一时刻只允许一个全量替换在跑
+# （全量替换是先删后建，两个 run 撞车会互相清空）。
 concurrency:
   group: update-data-sync
   cancel-in-progress: false

@@ -36,7 +36,7 @@ A/
 
 | 项目文件夹 | 业务 | Workflow |
 |---|---|---|
-| 数据汇总/ | 懂火 **9 模块**（出库/销售明细/应收/往来/客户/销售订单/采购订单/采购明细/库存）→ 飞书多维表，一次登录批量写入。**全 JSON 接口、零浏览器**；加模块只改脚本里的 `PARTS` 注册表 | `Update_Data.yml`、`Update_Data_legacy.yml`（回滚备用）、`sync_chuku_to_bitable.yml`（旧版单模块） |
+| 数据汇总/ | 懂火 **9 模块**（出库/销售明细/应收/往来/客户/销售订单/采购订单/采购明细/库存）→ 飞书多维表，一次登录批量写入。**全 JSON 接口、零浏览器**；加模块只改脚本里的 `PARTS` 注册表 | `Update_Data.yml`、`sync_chuku_to_bitable.yml`（旧版单模块） |
 | 懂火出库导出/ | 懂火出库记录 → CSV → 飞书云盘/邮件 | `export.yml` |
 | 懂火加工单同步/ | 加工单导出到飞书 + 加工成品写回懂火 | `export_jiagong.yml`、`import_jiagong.yml` |
 | 懂火每周全量备份/ | 10 类业务数据 → XLSX → 飞书云盘，周报通知 | `backup_all.yml` |
