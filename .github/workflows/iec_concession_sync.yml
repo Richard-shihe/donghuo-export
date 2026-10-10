@@ -1,0 +1,74 @@
+name: 让步接收——IEC 让步接收单 → 飞书多维表
+
+# 触发方式：
+#   · 手动：Actions 页面 "Run workflow"（可勾 dry-run 只预览不写）
+#   · 定时：**不配 schedule**（2026-10-11 用户决定：定时由用户在飞书侧自行安排）
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "只预览不写飞书（true=不写）"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 设置 Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: 安装 Python 依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 执行让步接收同步
+        env:
+          IBAO_USERNAME: ${{ secrets.IBAO_USERNAME }}
+          IBAO_PASSWORD: ${{ secrets.IBAO_PASSWORD }}
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+          TZ: "Asia/Shanghai"
+        run: |
+          set -euo pipefail
+
+          # 必填 Secret 检查（只报缺哪个，不打印值）
+          ERR=0
+          for k in IBAO_USERNAME IBAO_PASSWORD FEISHU_APP_ID FEISHU_APP_SECRET; do
+            if [ -z "${!k}" ]; then
+              echo "::error:: 缺少 Secrets: $k（仓库 Settings → Secrets and variables → Actions）"
+              ERR=1
+            fi
+          done
+          [ "$ERR" = "0" ] || exit 1
+          echo "=== Secrets 必填项检查通过 ==="
+          # app_id 非机密（现有工作流同样打印前 7 位），用于确认本次用的是哪个应用
+          echo "多维表操作应用 app_id = ${FEISHU_APP_ID:0:7}***"
+
+          ARGS=""
+          if [ "$DRY_RUN" = "true" ]; then
+            ARGS="--dry-run"
+            echo "=== dry-run 模式：只预览不写飞书 ==="
+          fi
+
+          python "IEC让步接收/sync_concession.py" $ARGS
+
+      - name: 失败提示
+        if: failure()
+        run: |
+          echo "::warning:: 让步接收同步失败，排查顺序："
+          echo "::warning::   1. IBAO 账密/验证码是否仍可用"
+          echo "::warning::   2. 上面打印的 app_id 是否为「综合整理——环月（新）」的可编辑协作者（SH Robot = cli_aaf0ce1e9ef89d27）"
+          echo "::warning::   3. 让步接收单页面 URL / 查询接口是否变更"
