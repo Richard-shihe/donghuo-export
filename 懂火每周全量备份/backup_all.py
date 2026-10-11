@@ -32,10 +32,14 @@
   如日后需要换文件夹，直接改 TASKS 中各条目的 folder_token 即可。
 
 注意：
-  - 服务端对单页返回数有上限（约 300 条），且 offset = page * limit 用的是我们传的 limit。
-    若 limit > 300，每页会跳过 (limit-300) 条数据，导致丢页。因此默认 limit=200。
+  - 服务端每页最多返回 300 条，但 pgtotal（总页数）是按**请求的** limit 算的。
+    请求 limit > 300 时页数变少、每页仍只有 300 条，中间记录被静默跳过。
+    2026-10-11 实测依据见本目录 _probe_paging.py；代码里有硬校验（SERVER_MAX_PAGE_SIZE）。
   - 懂火后端 SQL Server 连接池不稳，连续请求偶发 "远程主机强迫关闭了一个现有的连接"。
     脚本每页/每类请求都做了 3 次重试，并在每类业务之间 sleep 4s。
+  - 数据完整性：拉取阶段任何"条数少于接口声明的总数"的情况都抛 RuntimeError，
+    该业务记 FAIL、脚本退出码非零 —— 宁可失败告警，绝不静默上传不完整的数据。
+    依据：rtotal 经实测确认就是总记录数（应收结算 581 条，翻页拉完 581 条，零重复零缺口）。
 
 依赖：
   pip install requests urllib3 ddddocr openpyxl
@@ -70,6 +74,14 @@ FEISHU_OPEN_BASE = "https://open.feishu.cn/open-apis"
 
 # 备份日期范围文件名后缀格式
 DATE_FMT = "%Y%m%d_%H%M%S"
+
+# 分页接口每页返回上限（2026-10-11 实测，依据见本目录 _probe_paging.py）：
+#   limit=300  → 返回 300 条
+#   limit=500  → 仍只返回 300 条，limit=1000 → 也仍是 300 条
+#   而 pgtotal 是按**请求的** limit 计算的（例：49240 条，limit=200 → 247 页）
+# 所以请求超过 300 时：页数变少、每页仍只有 300 条，中间记录被静默跳过。
+# 切勿调大。
+SERVER_MAX_PAGE_SIZE = 300
 
 # 10 类业务接口配置（与 apis.json 同步）
 # folder_token：飞书云盘子文件夹 token，已直接写死在此，不用再配 GitHub Secrets
@@ -220,17 +232,34 @@ def fetch_json_paged(session: requests.Session,
                      limit_param: str = "limit",
                      total_field: str = "pgtotal",
                      records_field: str = "root",
-                     page_size: int = 500,
+                     page_size: int = SERVER_MAX_PAGE_SIZE,
                      max_pages: int = 1000) -> tuple[list[dict], dict]:
     """
     分页拉取 JSON 接口全量数据。
-    - 每页级重试：遇到 SQL 断连 / 非 JSON / HTTP != 200，sleep 5s 后重试，最多 3 次
-    返回 (records, meta)，meta 包含 total_count / total_pages / extra_top_keys。
+
+    完整性契约：只在确实拿到全部数据时返回；任何拿不准的情况一律抛 RuntimeError，
+    绝不返回半份数据（备份脚本最怕的不是失败，而是少备份了却报成功）。
+    拦住的情形：
+      - page_size 超出服务端上限 300
+      - 某页重试 3 次仍失败
+      - 某页 root 为空但接口声明还有后续页
+      - pgtotal / rtotal 解析不出整数
+      - 非末页返回条数少于 page_size（服务端截断 = 正在丢数据）
+      - 拉完的条数与 rtotal 对不上
+
+    返回 (records, meta)；meta 含 total_count / total_pages / extra_top_keys / summary_values。
     """
+    if not (1 <= page_size <= SERVER_MAX_PAGE_SIZE):
+        raise RuntimeError(
+            f"page_size={page_size} 超出服务端上限 {SERVER_MAX_PAGE_SIZE}："
+            f"服务端每页最多返回 {SERVER_MAX_PAGE_SIZE} 条，但分页总数按请求的 limit 计算，"
+            f"请求更大的 limit 会导致中间记录被静默跳过。")
+
     url = BASE_URL + api_path
     headers = {"X-Requested-With": "XMLHttpRequest"}
     all_records: list[dict] = []
-    meta: dict = {"total_count": 0, "total_pages": 0, "extra_top_keys": []}
+    meta: dict = {"total_count": 0, "total_pages": 0,
+                  "extra_top_keys": [], "summary_values": []}
     RETRIES_PER_PAGE = 3
     RETRY_SLEEP = 6
 
@@ -270,38 +299,57 @@ def fetch_json_paged(session: requests.Session,
             # 这一页请求成功
             break
         else:
-            # 全部重试耗尽
-            print(f"  [页 {page}] 多次重试失败，停止拉取。最后错误: {last_err}")
-            break
-
-        records = parsed.get(records_field) or []
-        if not records:
-            # root 为空可能是真的最后一页，也可能是服务器异常 — 保守停止
-            print(f"  [页 {page}] root 为空，停止")
-            break
+            # 全部重试耗尽 —— 绝不返回半份数据
+            raise RuntimeError(
+                f"{api_path} 第 {page}/{meta['total_pages'] or '?'} 页重试 "
+                f"{RETRIES_PER_PAGE} 次仍失败，已拉 {len(all_records)} 行"
+                f"（接口声明 {meta['total_count']} 行）。最后错误: {last_err}")
 
         if page == 1:
             try:
-                total_pages = int(parsed.get(total_field) or 1)
+                total_pages = int(parsed.get(total_field))
+                total_count = int(parsed.get("rtotal"))
             except (TypeError, ValueError):
-                total_pages = 1
-            try:
-                total_count = int(parsed.get("rtotal") or 0)
-            except (TypeError, ValueError):
-                total_count = 0
+                raise RuntimeError(
+                    f"{api_path} 第一页返回的 {total_field}/rtotal 无法解析为整数："
+                    f"{total_field}={parsed.get(total_field)!r}, "
+                    f"rtotal={parsed.get('rtotal')!r}。无法确认应拉多少页，拒绝继续。")
+            if total_pages < 1:
+                raise RuntimeError(f"{api_path} 声明总页数 {total_pages} < 1，异常。")
+            if total_pages > max_pages:
+                raise RuntimeError(
+                    f"{api_path} 声明 {total_pages} 页，超过 max_pages={max_pages} 上限。")
             meta["total_pages"] = total_pages
             meta["total_count"] = total_count
-            # 顶层 key 中除了 root/pgtotal/page/rtotal 之外的，归为 extra
+            # 顶层 key 中除了 root/pgtotal/page/rtotal 之外的，归为 extra（汇总字段）
             standard_keys = {records_field, total_field, "page", "rtotal"}
             meta["extra_top_keys"] = [k for k in parsed.keys() if k not in standard_keys]
-            # 检测服务端是否截断了每页条数
-            actual_page_size = len(records)
-            if actual_page_size < page_size:
-                print(f"  [警告] 服务端每页只返回 {actual_page_size} 条（请求 {page_size}），"
-                      f"已自动适配。")
-            print(f"  接口返回: 共 {total_count} 条, {total_pages} 页 (实际每页 {actual_page_size})")
+            # 汇总字段的值与 limit 无关（2026-10-11 实测），第一页直接取值即可。
+            # 原先另发一次 limit=1 的裸请求去取这些值，那次请求没有重试保护，已移除。
+            meta["summary_values"] = [
+                (k, "" if parsed.get(k) is None else str(parsed.get(k)))
+                for k in meta["extra_top_keys"]
+            ]
+            print(f"  接口返回: 共 {total_count} 条, {total_pages} 页")
             if meta["extra_top_keys"]:
                 print(f"  汇总字段 (extra_top_keys): {meta['extra_top_keys']}")
+
+        records = parsed.get(records_field) or []
+        if not records:
+            if page < meta["total_pages"]:
+                raise RuntimeError(
+                    f"{api_path} 第 {page}/{meta['total_pages']} 页返回空，"
+                    f"但接口声明还有后续页 —— 疑似服务端异常。"
+                    f"已拉 {len(all_records)} 行（接口声明 {meta['total_count']} 行），"
+                    f"拒绝返回半份数据。")
+            print(f"  [页 {page}] root 为空，已达末页，停止")
+            break
+
+        # 非末页返回条数少于请求值 = 服务端在截断，继续拉会静默丢数据
+        if len(records) < page_size and page < meta["total_pages"]:
+            raise RuntimeError(
+                f"{api_path} 第 {page}/{meta['total_pages']} 页只返回 {len(records)} 条"
+                f"（请求 {page_size} 条），且不是末页 —— 服务端截断，继续拉会丢数据。")
 
         all_records.extend(records)
         print(f"  第 {page}/{meta['total_pages']} 页: +{len(records)} 行, 累计 {len(all_records)} 行")
@@ -311,6 +359,13 @@ def fetch_json_paged(session: requests.Session,
         page += 1
         time.sleep(0.5)  # 友好限速（翻页间隔稍长，减少 SQL 压力）
 
+    # 总闸：拉到的条数必须等于接口声明的总数。这是最后一道防线，
+    # 上面任何一处被绕过（比如服务端分页语义变化），这里都会拦住。
+    if len(all_records) != meta["total_count"]:
+        raise RuntimeError(
+            f"{api_path} 完整性校验失败：接口声明 {meta['total_count']} 行，"
+            f"实际拉到 {len(all_records)} 行，相差 "
+            f"{meta['total_count'] - len(all_records)} 行。拒绝返回不完整的数据。")
     return all_records, meta
 
 
@@ -637,6 +692,12 @@ def main() -> int:
         print("[错误] 缺少 DH_USERNAME / DH_PASSWORD")
         return 2
 
+    if not (1 <= page_size <= SERVER_MAX_PAGE_SIZE):
+        print(f"[错误] BACKUP_PAGE_SIZE={page_size} 超出服务端上限 {SERVER_MAX_PAGE_SIZE}："
+              f"服务端每页最多返回 {SERVER_MAX_PAGE_SIZE} 条，但分页总数按请求的 limit 计算，"
+              f"超限会导致中间记录被静默跳过。请在 1~{SERVER_MAX_PAGE_SIZE} 之间取值。")
+        return 2
+
     if not dry_run and (not fs_app_id or not fs_app_secret):
         print("[错误] 缺少 FEISHU_APP_ID / FEISHU_APP_SECRET")
         return 2
@@ -697,19 +758,9 @@ def main() -> int:
                 )
                 rows_count = len(records)
                 cols_count = len(records[0]) if records else 0
-                extra_summary = meta.get("extra_top_keys", [])
-                summary_pairs: list[tuple[str, str]] = []
-                if extra_summary:
-                    # 重新拉一次第一页拿汇总字段值
-                    parsed_first = _try_parse_json(
-                        session.post(BASE_URL + task["api_path"],
-                                     data={task["page_param"]: 1,
-                                           task["limit_param"]: 1},
-                                     headers={"X-Requested-With": "XMLHttpRequest"},
-                                     timeout=60).text)
-                    for k in extra_summary:
-                        v = parsed_first.get(k, "") if isinstance(parsed_first, dict) else ""
-                        summary_pairs.append((k, "" if v is None else str(v)))
+                # 汇总字段值由 fetch_json_paged 在拉第一页时顺手带回（实测与 limit 无关），
+                # 此处不再另发一次无重试保护的请求。
+                summary_pairs: list[tuple[str, str]] = meta.get("summary_values") or []
                 xlsx_bytes = records_to_xlsx_bytes(records, summary_pairs or None)
 
             elif task["api_type"] == "html_export":

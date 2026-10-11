@@ -113,6 +113,12 @@ desktop.ini
 *_result.txt
 *_dryrun.txt
 
+# --- 懂火每周全量备份：运行产物不入库（2026-10-11 补）---
+# backup_all.py 每次运行都会把 10 类业务的 XLSX 写到这个目录
+# （客户名称/金额/重量等业务数据全在里面），原先没有任何规则挡着，
+# 一次 `git add .` 就会把它们扫进**公开仓库**。
+/懂火每周全量备份/backup_local/
+
 # --- Windows 复制文件产生的「- 副本」命名（2026-10-06 补）---
 # Certification/stage1_certs_download - 副本.py 与已跟踪主文件逐字节相同
 # （md5 180330f232014c69f457f8268f6d0d49，33480 字节），纯垃圾。
