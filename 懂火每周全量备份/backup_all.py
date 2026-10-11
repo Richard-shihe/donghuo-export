@@ -44,19 +44,28 @@
 依赖：
   pip install requests urllib3 ddddocr openpyxl
 
-GitHub Actions 触发：每周定时（推荐 cron-job.org 外部 POST，避免 GitHub schedule 静默延迟）
+GitHub Actions 触发：原生 schedule（周三、周六 凌晨 3 点北京时间）+ 手动 workflow_dispatch。
+  说明：本仓库旧约定是「不用 native schedule，改走外部 cron-job.org 触发」以避免 GitHub
+        静默延迟。但 2026-10-11 查明外部那条任务从未真正配起来 —— 本 workflow 从
+        2026-08-17 建好到 10-11 只在建好当天手动跑过 1 次，两个月的「每周备份」实际一次
+        都没跑。对每周两次的备份来说延迟几十分钟无关紧要，而外部依赖（PAT 过期 / 任务
+        没配）才是真正的单点故障，因此改用原生 schedule，并保留手动入口。
 """
 
 import os
 import re
 import io
-import csv
 import sys
 import json
 import time
 import datetime
 import traceback
 from pathlib import Path
+
+# Windows 下被 bat / 计划任务启动时控制台默认 cp936，print 中文或符号会抛
+# UnicodeEncodeError（本仓库已多次踩到）。父进程没设 PYTHONIOENCODING 时兜底。
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 # 调试用默认账号（不提交，生产环境走 GitHub Secrets / 系统环境变量）
 os.environ.setdefault("DH_USERNAME", os.environ.get("DH_USERNAME") or "")
@@ -564,41 +573,6 @@ def rows_2d_to_xlsx_bytes(rows_2d: list[list[str]]) -> bytes:
     return buf.getvalue()
 
 
-# ===== 兼容旧 CSV 函数（保留不删，防止其他依赖此文件的代码出错，本脚本主流程不再使用） =====
-
-def records_to_csv_bytes(records: list[dict], extra_top_keys: list[str] = None) -> bytes:
-    """list[dict] → CSV 字节（UTF-8-SIG）。已废弃，请用 records_to_xlsx_bytes。"""
-    if not records and not extra_top_keys:
-        return b""
-    fields: list[str] = []
-    for r in records:
-        for k in r.keys():
-            if k not in fields:
-                fields.append(k)
-    buf = io.StringIO()
-    writer = csv.writer(buf)
-    writer.writerow(fields)
-    for r in records:
-        row = [("" if r.get(f) is None else str(r.get(f))) for f in fields]
-        writer.writerow(row)
-    if extra_top_keys:
-        writer.writerow([])
-        writer.writerow(["# 汇总字段"])
-        for k in extra_top_keys:
-            writer.writerow([f"# {k}"])
-    return buf.getvalue().encode("utf-8-sig")
-
-
-def html_table_to_csv_bytes(html_bytes: bytes) -> tuple[bytes, int, int]:
-    """保留旧签名，内部委托给 _parse_html_table_to_rows。新代码请用 xlsx 分支。"""
-    rows_data = _parse_html_table_to_rows(html_bytes)
-    buf = io.StringIO()
-    writer = csv.writer(buf)
-    for row in rows_data:
-        writer.writerow(row)
-    return buf.getvalue().encode("utf-8-sig"), len(rows_data), len(rows_data[0])
-
-
 # ===================== 飞书云盘 + 通知 =====================
 
 def env(name: str, default: str = "") -> str:
@@ -628,7 +602,14 @@ def feishu_upload_to_folder(token: str, folder_token: str,
     if size == 0:
         raise ValueError("上传文件为空")
     if size > max_size_mb * 1024 * 1024:
-        raise ValueError(f"文件 {size/1024/1024:.1f}MB 超过 upload_all 上限 {max_size_mb}MB")
+        raise ValueError(
+            f"文件 {size/1024/1024:.1f}MB 超过飞书 upload_all 上限 {max_size_mb}MB —— "
+            f"该类业务数据量已超出单文件上限，需要改走分片上传"
+            f"（drive/v1/files/upload_prepare + upload_part + upload_finish），"
+            f"或把该类业务拆成多份导出。")
+    if size > 0.8 * max_size_mb * 1024 * 1024:
+        print(f"  [WARN] 文件 {size/1024/1024:.1f}MB 已达上传上限 {max_size_mb}MB 的 "
+              f"{size/(max_size_mb*1024*1024)*100:.0f}%，接近临界，留意数据量增长。")
     if not folder_token:
         raise ValueError("缺少 folder_token")
 
@@ -650,6 +631,86 @@ def feishu_upload_to_folder(token: str, folder_token: str,
     file_token = file_info.get("file_token") or file_info.get("token") or ""
     print(f"  [飞书云盘] 上传成功 file_token={file_token}")
     return file_info
+
+
+# 备份文件名格式：<prefix>_YYYYMMDD_HHMMSS.xlsx
+BACKUP_NAME_RE = re.compile(r"^(.+)_(\d{8}_\d{6})\.xlsx$")
+
+
+def list_folder_backups(token: str, folder_token: str, filename_prefix: str) -> list[dict]:
+    """列出云盘文件夹里**本脚本自己上传的**备份文件，按时间戳倒序（最新在前）。
+
+    只认严格匹配 `<prefix>_YYYYMMDD_HHMMSS.xlsx` 的名字 —— 手动放进文件夹的任何东西
+    （改过名的、别的格式的、别的项目传的）都不会被选中，保证清理只动脚本自己的产物。
+    """
+    url = f"{FEISHU_OPEN_BASE}/drive/v1/files"
+    headers = {"Authorization": f"Bearer {token}"}
+    items: list[dict] = []
+    page_token = ""
+    while True:
+        params: dict = {"folder_token": folder_token, "page_size": 50}
+        if page_token:
+            params["page_token"] = page_token
+        r = requests.get(url, headers=headers, params=params, timeout=30)
+        d = r.json()
+        if d.get("code") != 0:
+            raise RuntimeError(f"列出云盘文件夹失败: code={d.get('code')} msg={d.get('msg')}")
+        data = d.get("data") or {}
+        for f in (data.get("files") or []):
+            m = BACKUP_NAME_RE.match(f.get("name", ""))
+            if m and m.group(1) == filename_prefix:
+                items.append({"name": f["name"], "token": f.get("token", ""),
+                              "ts": m.group(2)})
+        if not data.get("has_more"):
+            break
+        page_token = data.get("next_page_token") or data.get("page_token") or ""
+        if not page_token:
+            break
+    items.sort(key=lambda x: x["ts"], reverse=True)
+    return items
+
+
+def feishu_delete_file(token: str, file_token: str) -> None:
+    """删除云盘文件（type=file）。"""
+    url = f"{FEISHU_OPEN_BASE}/drive/v1/files/{file_token}"
+    r = requests.delete(url, headers={"Authorization": f"Bearer {token}"},
+                        params={"type": "file"}, timeout=30)
+    d = r.json()
+    if d.get("code") != 0:
+        raise RuntimeError(f"删除失败 code={d.get('code')} msg={d.get('msg')}")
+
+
+def cleanup_old_backups(token: str, folder_token: str, filename_prefix: str,
+                        keep: int) -> dict:
+    """保留最近 keep 期，删除更早的。返回 {"kept", "deleted", "failed", "skipped"}。
+
+    安全约束（缺一不可）：
+      - 只在**本次上传成功之后**才调用，绝不先删后传（否则上传失败就两头空）；
+      - 只删文件名严格匹配 <prefix>_YYYYMMDD_HHMMSS.xlsx 的文件；
+      - keep <= 0 直接返回，什么都不删；
+      - 单个文件删除失败只记 WARN，不中断整体流程。
+    """
+    if keep <= 0:
+        return {"kept": 0, "deleted": 0, "failed": 0, "skipped": True}
+
+    files = list_folder_backups(token, folder_token, filename_prefix)
+    if len(files) <= keep:
+        print(f"  [保留策略] 现有 {len(files)} 期 <= 保留 {keep} 期，无需清理")
+        return {"kept": len(files), "deleted": 0, "failed": 0, "skipped": False}
+
+    stale = files[keep:]
+    print(f"  [保留策略] 现有 {len(files)} 期，保留最近 {keep} 期，删除 {len(stale)} 期：")
+    deleted = failed = 0
+    for f in stale:
+        try:
+            feishu_delete_file(token, f["token"])
+            print(f"    已删除 {f['name']}")
+            deleted += 1
+        except Exception as e:
+            print(f"    [WARN] 删除失败 {f['name']}: {e}")
+            failed += 1
+        time.sleep(0.3)
+    return {"kept": keep, "deleted": deleted, "failed": failed, "skipped": False}
 
 
 def _feishu_sign(secret: str, timestamp: str) -> str:
@@ -685,8 +746,20 @@ def main() -> int:
     fs_app_secret = env("FEISHU_APP_SECRET")
     fs_webhook_url = env("FEISHU_WEBHOOK_URL")
     fs_webhook_secret = env("FEISHU_WEBHOOK_SECRET")
-    page_size = int(env("BACKUP_PAGE_SIZE", "200") or "200")
+    page_size = int(env("BACKUP_PAGE_SIZE", str(SERVER_MAX_PAGE_SIZE))
+                    or str(SERVER_MAX_PAGE_SIZE))
     dry_run = env("BACKUP_DRY_RUN", "") == "1"
+    # 只跑指定业务（逗号分隔），留空 = 全部。用于失败后单类重跑，免去重拉 10 类。
+    only_biz = {x.strip() for x in env("BACKUP_ONLY", "").split(",") if x.strip()}
+    # 云盘保留最近多少期；0 = 不清理。默认 52 期 ≈ 半年（每周两次）。
+    try:
+        keep_periods = int(env("BACKUP_KEEP_PERIODS", "52") or "52")
+    except ValueError:
+        print("[错误] BACKUP_KEEP_PERIODS 必须是整数")
+        return 2
+    if keep_periods < 0:
+        print("[错误] BACKUP_KEEP_PERIODS 不能为负（0 = 不清理）")
+        return 2
 
     if not username or not password:
         print("[错误] 缺少 DH_USERNAME / DH_PASSWORD")
@@ -698,6 +771,13 @@ def main() -> int:
               f"超限会导致中间记录被静默跳过。请在 1~{SERVER_MAX_PAGE_SIZE} 之间取值。")
         return 2
 
+    if only_biz:
+        unknown = only_biz - {t["biz"] for t in TASKS}
+        if unknown:
+            print(f"[错误] BACKUP_ONLY 里有未知业务名: {sorted(unknown)}")
+            print(f"       可用业务名: {[t['biz'] for t in TASKS]}")
+            return 2
+
     if not dry_run and (not fs_app_id or not fs_app_secret):
         print("[错误] 缺少 FEISHU_APP_ID / FEISHU_APP_SECRET")
         return 2
@@ -705,8 +785,12 @@ def main() -> int:
     print("=" * 70)
     print("懂火系统 - 每周全量备份 10 类业务数据")
     print(f"时间: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"模式: {'DRY-RUN (仅本地 CSV)' if dry_run else '上传飞书云盘'}")
+    print(f"模式: {'DRY-RUN (仅生成 XLSX 到本地，不上传)' if dry_run else '上传飞书云盘'}")
     print(f"分页: 每页 {page_size} 条")
+    if only_biz:
+        print(f"范围: 只跑 {sorted(only_biz)}（共 {len(only_biz)} 类）")
+    if not dry_run:
+        print(f"云盘保留: 最近 {keep_periods} 期" + ("（不清理）" if keep_periods == 0 else ""))
     print("=" * 70)
 
     # 登录
@@ -734,6 +818,8 @@ def main() -> int:
 
     for idx, task in enumerate(TASKS, 1):
         biz = task["biz"]
+        if only_biz and biz not in only_biz:
+            continue
         print(f"\n[{idx}/{len(TASKS)}] === {biz} ===")
         folder_token = task.get("folder_token", "")
         if not dry_run and not folder_token:
@@ -808,6 +894,16 @@ def main() -> int:
                 "file_token": file_info.get("file_token", ""),
             })
 
+            # 保留策略：只在本次上传**成功之后**才清理更早的期 —— 顺序反了的话，
+            # 上传一旦失败就两头空。清理本身出错只记 WARN，不改写本业务的成功状态。
+            if keep_periods > 0:
+                try:
+                    cl = cleanup_old_backups(fs_token, folder_token,
+                                             task["filename_prefix"], keep_periods)
+                    summary[-1]["deleted"] = cl["deleted"]
+                except Exception as e:
+                    print(f"  [WARN] 清理旧备份失败（不影响本次备份）: {e}")
+
         except Exception as e:
             print(f"  [失败] {biz}: {e}")
             traceback.print_exc()
@@ -825,12 +921,15 @@ def main() -> int:
     print("\n" + "=" * 70)
     print("[汇总] 备份结果:")
     for s in summary:
-        status_icon = {"OK": "✅", "DRY_RUN": "💾", "SKIP_NO_FOLDER": "⏭️", "FAIL": "❌"}.get(s["status"], "?")
-        line = f"  {status_icon} {s['biz']:<15} {s['status']}"
+        # 控制台用文本标记，不用 emoji（AGENTS.md 5.2：Windows cp936 下 emoji 会抛 UnicodeEncodeError）
+        tag = {"OK": "[OK]", "DRY_RUN": "[DRY]", "SKIP_NO_FOLDER": "[SKIP]"}.get(s["status"], "[FAIL]")
+        line = f"  {tag:<7} {s['biz']:<15} {s['status']}"
         if s.get("rows") is not None:
             line += f" ({s['rows']} 行)"
         if s.get("size_kb") is not None:
             line += f" {s['size_kb']} KB"
+        if s.get("deleted"):
+            line += f" | 清理旧期 {s['deleted']} 个"
         if s.get("filename"):
             line += f" → {s['filename']}"
         if s.get("error"):
@@ -850,6 +949,8 @@ def main() -> int:
             f"总记录数: {total_rows}",
             "",
         ]
+        # 飞书通知正文保留 emoji：AGENTS.md 5.2 约束的是 print 到控制台的输出，
+        # 这条是发给人的消息，emoji 在此是有效的视觉标记。
         for s in summary:
             icon = {"OK": "✅", "DRY_RUN": "💾", "SKIP_NO_FOLDER": "⏭️", "FAIL": "❌"}.get(s["status"], "?")
             line = f"{icon} {s['biz']}"
@@ -857,6 +958,8 @@ def main() -> int:
                 line += f" ({s['rows']} 行)"
             if s.get("size_kb") is not None:
                 line += f" {s['size_kb']}KB"
+            if s.get("deleted"):
+                line += f" · 清理{s['deleted']}期"
             notify_lines.append(line)
 
         try:

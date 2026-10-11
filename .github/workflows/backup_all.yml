@@ -1,10 +1,20 @@
 name: 懂火每周全量备份 10 类业务数据 → 飞书云盘
 
 # 触发方式：
+# - 定时：每周三、周六 凌晨 3 点（北京时间）。GitHub cron 用 UTC，
+#   北京 03:00 = UTC 前一日 19:00 → 周二(TUE=2)、周五(FRI=5) 的 19:00 UTC。
 # - 手动：Actions 页面点击 "Run workflow" 立即执行
-# - 定时：外部 cron-job.org 每周一次 HTTP 触发 workflow_dispatch
-#   （项目约定：不用 native on: schedule，避免 GitHub 静默延迟）
+#
+# 2026-10-11 变更说明：本仓库原约定是「不用 native on: schedule，改走外部
+# cron-job.org 触发，避免 GitHub 静默延迟」。但查明外部那条任务从未真正配起来 ——
+# 本 workflow 从 2026-08-17 建好到 10-11 只跑过 1 次（建好当天手动触发），
+# 两个月的「每周备份」实际一次都没跑。对每周两次的备份而言，延迟几十分钟无关紧要，
+# 而外部依赖（PAT 过期 / 任务没配）才是真正的单点故障，因此改用原生 schedule，
+# 并保留手动入口。注：GitHub 对长期无活动的仓库会自动停用 schedule，
+# 本仓库几乎每天有提交，暂无此风险。
 on:
+  schedule:
+    - cron: "0 19 * * 2,5"
   workflow_dispatch:
     inputs:
       dry_run:
@@ -12,6 +22,16 @@ on:
         required: false
         type: boolean
         default: false
+      only:
+        description: "只跑指定业务（逗号分隔，如「应收结算,费用管理」；留空 = 全部 10 类）"
+        required: false
+        type: string
+        default: ""
+      keep_periods:
+        description: "云盘保留最近多少期（默认 52 ≈ 半年；0 = 不清理）"
+        required: false
+        type: string
+        default: "52"
       reason:
         description: "手动触发说明（可选）"
         required: false
@@ -58,8 +78,16 @@ jobs:
           FEISHU_WEBHOOK_SECRET: ${{ secrets.FEISHU_WEBHOOK_SECRET }}
 
           # ===== 可选运行参数 =====
-          # 分页每页条数（默认 200；服务端上限约 300，超过会丢数据）
-          BACKUP_PAGE_SIZE: ${{ vars.BACKUP_PAGE_SIZE || '200' }}
+          # 分页每页条数。上限 300（2026-10-11 实测：limit>300 时服务端仍只返回 300 条，
+          # 而分页总数按请求的 limit 计算，中间记录会被静默跳过）。
+          # 默认取 300 —— 比 200 少翻约 1/3 的页，整轮省 6~8 分钟；越界脚本会直接退出。
+          BACKUP_PAGE_SIZE: ${{ vars.BACKUP_PAGE_SIZE || '300' }}
+
+          # 只跑指定业务（失败后单类重跑，免去重拉另外 9 类）；留空 = 全部
+          BACKUP_ONLY: ${{ github.event.inputs.only || '' }}
+
+          # 云盘保留最近多少期，更早的自动删除；0 = 不清理
+          BACKUP_KEEP_PERIODS: ${{ github.event.inputs.keep_periods || '52' }}
 
           # 时区（确保文件名时间正确）
           TZ: "Asia/Shanghai"
@@ -67,7 +95,9 @@ jobs:
           # 注：10 个飞书云盘子文件夹的 folder_token 已直接写在
           #     backup_all.py 的 TASKS 配置里，不再通过 Secrets 注入。
         run: |
-          if [ "${{ fromJSON(inputs.dry_run) }}" = "true" ]; then
+          # 用 github.event.inputs（而不是 inputs 上下文）：schedule 触发时前者为 null
+          # 可被 || 兜底，后者在非 workflow_dispatch 事件里取值不可靠。
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
             export BACKUP_DRY_RUN=1
             echo "DRY-RUN 模式：仅生成 XLSX 到本地，不上传云盘"
           else
