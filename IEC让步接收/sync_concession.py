@@ -58,6 +58,8 @@ QUERY = f"{IECS}/order/concession/contractConcessionReceive/queryConcessionRecei
 OPEN = "https://open.feishu.cn/open-apis"
 BITABLE_APP = "Tz0XbQVzkaZuJasBwb8cRjkfnoe"      # 综合整理——环月（新）
 BITABLE_TABLE_NAME = "让步接收单"
+PROGRESS_TABLE = "tblvugnoJPS8GrpX"                # 「进度」表（结案项目）：资源号 → 参与人
+FIELD_PARTICIPANTS = "参与人"                       # 人员字段，由本脚本按订单号匹配写入
 
 # IEC 列 → 飞书字段
 COLS = ["让步申请单号", "钢厂订单号", "变更原因", "变更描述", "规格", "牌号", "品种",
@@ -235,6 +237,61 @@ def ftext(v) -> str:
     return str(v).strip()
 
 
+def _extract_users(v) -> list[str]:
+    """从 Lookup 人员回读值里提取 ou_id（去重保序）"""
+    out: list[str] = []
+
+    def walk(x):
+        if isinstance(x, dict):
+            i = x.get("id")
+            if isinstance(i, str) and i.startswith("ou_"):
+                if i not in out:
+                    out.append(i)
+            else:
+                for k in ("users", "value"):
+                    if k in x:
+                        walk(x[k])
+        elif isinstance(x, list):
+            for y in x:
+                walk(y)
+
+    walk(v)
+    return out
+
+
+def load_progress_index(tk: str) -> dict[str, list[str]]:
+    """读「进度」表：资源号 → [参与人 ou_id]（进度表的「参与」是 Lookup 人员）"""
+    H = {"Authorization": f"Bearer {tk}"}
+    index: dict[str, list[str]] = {}
+    pt = None
+    n = 0
+    while True:
+        params = {"page_size": 500}
+        if pt:
+            params["page_token"] = pt
+        r = requests.get(f"{OPEN}/bitable/v1/apps/{BITABLE_APP}/tables/{PROGRESS_TABLE}/records",
+                         params=params, headers=H, timeout=30, proxies=NO_PROXY)
+        d = r.json()
+        if d.get("code") != 0:
+            raise RuntimeError(f"读进度表失败: {d.get('code')} {d.get('msg')}")
+        data = d.get("data") or {}
+        for rec in data.get("items") or []:
+            f = rec.get("fields") or {}
+            res = ftext(f.get("资源号")).strip()
+            if not res:
+                continue
+            n += 1
+            bucket = index.setdefault(res, [])
+            for uid in _extract_users(f.get("参与")):
+                if uid not in bucket:
+                    bucket.append(uid)
+        if not data.get("has_more"):
+            break
+        pt = data.get("page_token")
+    print(f"[进度表] {n} 条记录 / {len(index)} 个资源号")
+    return index
+
+
 def now_ms() -> int:
     return int(time.time() * 1000)
 
@@ -276,6 +333,22 @@ def main() -> int:
         existing = load_existing(tk, tid)
     print(f"[飞书] 现有记录 {len(existing)} 条")
 
+    # 进度表：资源号 → 参与人（读失败则本次跳过，避免把已有参与人清空）
+    progress: dict[str, list[str]] = {}
+    try:
+        progress = load_progress_index(tk)
+    except Exception as e:
+        print(f"[WARN] 读进度表失败，本次跳过参与人更新: {e}")
+
+    def participants(row: dict) -> list[dict]:
+        """按该单全部钢厂订单号匹配参与人（去重保序）"""
+        ids: list[str] = []
+        for o in (row.get("钢厂订单号") or "").split("\n"):
+            for uid in progress.get(o.strip(), []):
+                if uid not in ids:
+                    ids.append(uid)
+        return [{"id": i} for i in ids]
+
     print("[3/4] 计算差异 ...", flush=True)
     to_create, to_update = [], []
     for r0 in rows:
@@ -285,6 +358,8 @@ def main() -> int:
             f = {k: r0[k] for k in COLS}
             f["首次抓取时间"] = now_ms()
             f["最后同步时间"] = now_ms()
+            if progress:
+                f[FIELD_PARTICIPANTS] = participants(r0)
             to_create.append({"fields": f})
         else:
             changes = {}
@@ -293,11 +368,17 @@ def main() -> int:
                 new = r0[fld]
                 if new and old != new:
                     changes[fld] = new
+            if progress:
+                new_parts = participants(r0)
+                old_ids = sorted(u.get("id") for u in (cur["fields"].get(FIELD_PARTICIPANTS) or [])
+                                 if isinstance(u, dict) and u.get("id"))
+                if sorted(p["id"] for p in new_parts) != old_ids:
+                    changes[FIELD_PARTICIPANTS] = new_parts
             if changes:
                 changes["最后同步时间"] = now_ms()
                 to_update.append({"record_id": cur["record_id"], "fields": changes})
                 if args.verbose:
-                    print(f"   [更新] {key}: {changes}")
+                    print(f"   [更新] {key}: {list(changes.keys())}")
     print(f"[差异] 新增 {len(to_create)} 条，更新 {len(to_update)} 条")
 
     if args.dry_run:
